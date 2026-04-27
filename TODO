@@ -1,0 +1,19 @@
+[MANDATORY — 10/20]
+[ ] Compile        (0.5pt) : wlkom.ko compilable avec make
+[ ] Connection     (3pt)   : kthread + kernel TCP socket vers C2, retry si déconnecté
+[ ] Persistence    (1.5pt) : systemd service, survit au reboot
+[ ] Executing cmds (5pt)   : CMD -> stdout/stderr/exit via socket
+[ ] Password       (1pt)   : non hardcodé (module_param ou fichier config)
+
+[OPTIONAL — 10/20, priorité par points]
+[ ] Upload / Download            (1.5 + 1.5pt)
+[ ] Hide dir/files from userland (2pt) : hook getdents64
+[ ] Hide line in file            (2pt) : hook read
+[ ] Hide module from lsmod       (1pt) : retirer de THIS_MODULE->list
+[ ] Cipher réseau                (1pt) : chiffrement des trames TCP
+
+[INFRA]
+[ ] Victim VM   : distro choisie, kernel >= 5.0.0, linux-headers installés
+[ ] Attacking VM: distro choisie, C2 fonctionnel
+[ ] Réseau QEMU : bridge virtuel entre les deux VMs configuré et testé
+[ ] README      : setup VMs, build, usage, justification choix techniques
