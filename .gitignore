@@ -1,3 +1,4 @@
+# kernel module build artifacts
 *.ko
 *.o
 *.mod
@@ -7,3 +8,10 @@
 modules.builtin
 modules.builtin.modinfo
 .tmp_versions/
+
+# VM disk images et seed ISOs (régénérables via ./vm.sh)
+vms/
+
+# Contenu du dossier partagé hôte<->VM (fichiers de travail temporaires)
+vmshare/*
+!vmshare/.gitignore

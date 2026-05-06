@@ -2,10 +2,6 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("wlkom");
-MODULE_DESCRIPTION("WLKOM - Wild Linux Kernel Object Module");
-MODULE_VERSION("1.0");
 
 static int __init wlkom_init(void)
 {
@@ -20,3 +16,7 @@ static void __exit wlkom_exit(void)
 
 module_init(wlkom_init);
 module_exit(wlkom_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("WLKOM - Wild Linux Kernel Object Module");
+MODULE_AUTHOR("NMT");
