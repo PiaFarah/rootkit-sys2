@@ -1,9 +1,9 @@
 [MANDATORY — 10/20]
 [ ] Compile        (0.5pt) : wlkom.ko compilable avec make
-[ ] Connection     (3pt)   : kthread + kernel TCP socket vers C2, retry si déconnecté
-[ ] Persistence    (1.5pt) : systemd service, survit au reboot
-[ ] Executing cmds (5pt)   : CMD -> stdout/stderr/exit via socket
-[ ] Password       (1pt)   : non hardcodé (module_param ou fichier config)
+[ ] Connection     (3pt)   : kthread + kernel TCP socket vers C2, retry si déconnecté # Pia, Gwenn
+[ ] Persistence    (1.5pt) : systemd service, survit au reboot # Pia, Gwenn
+[ ] Executing cmds (5pt)   : CMD -> stdout/stderr/exit via socket # Laurent, Christina
+[ ] Password       (1pt)   : non hardcodé (module_param ou fichier config) # Laurent, Christina
 
 [OPTIONAL — 10/20, priorité par points]
 [ ] Upload / Download            (1.5 + 1.5pt)
