@@ -260,21 +260,38 @@ Rediriger stdin/stdout/stderr du shell directement vers le socket TCP.
 
 ---
 
-## Protocole réseau recommandé
+## Protocole réseau implémenté
 
-Texte simple, messages délimités par `\n` :
+Texte simple, messages délimités par `\n`, sans encodage intermédiaire.
+
+### Phase d'authentification (à chaque connexion)
 
 ```
 # C2 → Rootkit
-CMD <commande shell>\n
-AUTH <hash_fnv1a>\n
-
-# Rootkit → C2
-CONNECTED\n
-OUT <contenu stdout encodé base64>\n
-ERR <contenu stderr encodé base64>\n
-EXIT <code>\n
+AUTH <hash_fnv1a_08x>\n
 ```
 
-Utiliser base64 pour les outputs évite les problèmes avec les `\n` dans les sorties de commandes.
-Pour le chiffrement (feature optionnelle) : wrapper XOR ou AES-128-CTR par-dessus ce protocole.
+Le C2 envoie ce message dès qu'un client se connecte. Le rootkit lit la ligne, vérifie que le préfixe est `AUTH ` puis compare le hash reçu avec `password_hash` (passé en `module_param` au chargement). Si la comparaison échoue, le socket est fermé et le rootkit retry.
+
+### Phase de commandes (après auth réussie)
+
+```
+# C2 → Rootkit
+<commande shell>\n
+
+# Rootkit → C2
+[Exit Status: <code>]\n
+--- STDOUT ---\n
+<contenu stdout brut, multi-lignes possible>\n
+--- STDERR ---\n
+<contenu stderr brut, multi-lignes possible>\n
+--- End of Output ---\n
+\n
+```
+
+Chaque réponse se termine par le marqueur `--- End of Output ---\n\n` (ligne vide finale). Le C2 lit en continu jusqu'à ce marqueur pour délimiter la fin d'une réponse avant d'afficher le prompt suivant.
+
+**Choix de conception :**
+- Pas de préfixe `CMD` côté C2 : la commande est envoyée telle quelle, ce qui simplifie le parsing côté kernel (pas de parsing de token)
+- Pas de base64 : les sorties brutes sont transmises directement ; les `\n` internes ne posent pas de problème car le délimiteur de fin est le marqueur `--- End of Output ---`
+- Pas de message `CONNECTED` : inutile, le C2 attend simplement la réponse à sa première commande

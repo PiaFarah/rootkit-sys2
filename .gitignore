@@ -14,7 +14,7 @@ vms/
 
 # Contenu du dossier partagé hôte<->VM (fichiers de travail temporaires)
 vmshare/*
-!vmshare/.gitignore
+# !vmshare/.gitignore
 
 # TD module
 module/

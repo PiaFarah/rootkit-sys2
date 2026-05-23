@@ -1,11 +1,11 @@
 [MANDATORY — 10/20]
 [x] Compile        (0.5pt) : wlkom.ko compilable avec make
 [x] Connection     (3pt)   : kthread + kernel TCP socket vers C2, retry si déconnecté
-[x] Persistence    (1.5pt) : systemd service, survit au reboot # Pia, Gwenn
-[ ] Executing cmds (5pt)   : CMD -> stdout/stderr/exit via socket # Pia, Gwenn, Laurent, Christina
-[ ] Password       (1pt)   : non hardcodé (module_param ou fichier config) # Laurent, Christina
+[x] Persistence    (1.5pt) : systemd service, survit au reboot
+[x] Executing cmds (5pt)   : CMD -> stdout/stderr/exit via socket
 
 [OPTIONAL — 10/20, priorité par points]
+[x] Password       (1pt)   : non hardcodé (module_param et fichier config)
 [ ] Upload / Download            (1.5 + 1.5pt)
 [ ] Hide dir/files from userland (2pt) : hook getdents64
 [ ] Hide line in file            (2pt) : hook read

