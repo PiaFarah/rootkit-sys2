@@ -18,3 +18,9 @@ vmshare/*
 
 # TD module
 module/
+
+# MkDocs site généré
+site/
+
+# Environnement Python pour la documentation
+.venv/

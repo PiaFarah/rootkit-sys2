@@ -1,0 +1,89 @@
+site_name: WLKOM — Wild Linux Kernel Object Module
+site_description: Rootkit pédagogique Linux — documentation complète du projet SYS2 EPITA
+site_url: https://piafarah.github.io/rootkit-sys2/
+repo_url: https://github.com/PiaFarah/rootkit-sys2
+repo_name: PiaFarah/rootkit-sys2
+
+theme:
+  name: material
+  language: fr
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+    - search.highlight
+    - search.suggest
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Passer en mode sombre
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Passer en mode clair
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Accueil: index.md
+  - Guide d'installation:
+    - guide/index.md
+    - Créer les VMs: guide/vms.md
+    - Compiler le module: guide/compile.md
+    - Charger le module: guide/load.md
+    - Installer la persistance: guide/persistence.md
+    - Utiliser le C2: guide/c2.md
+  - Code expliqué:
+    - code/index.md
+    - wlkom.c: code/wlkom.md
+    - c2.c: code/c2.md
+    - install_persistence.sh: code/install-persistence.md
+    - Protocole réseau: code/protocol.md
+  - Décisions de conception:
+    - decisions/index.md
+    - Outil de documentation: decisions/tooling.md
+    - Environnement et VMs: decisions/environment.md
+    - Connexion TCP: decisions/connection.md
+    - Persistance: decisions/persistence.md
+    - Exécution de commandes: decisions/exec.md
+    - Authentification: decisions/password.md
+  - Tests:
+    - tests/index.md
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
