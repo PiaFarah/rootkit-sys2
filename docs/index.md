@@ -1,84 +1,71 @@
-# WLKOM — Wild Linux Kernel Object Module
+# WLKOM : Wild Linux Kernel Object Module
 
-**WLKOM** est un rootkit Linux pédagogique développé dans le cadre du projet SYS2 à l'EPITA. C'est un module kernel (LKM) qui s'installe sur une machine victime, établit une connexion TCP persistante vers un programme attaquant distant, s'authentifie par hash, et exécute les commandes que l'attaquant lui envoie.
+WLKOM est un rootkit Linux pédagogique développé dans le cadre du projet SYS2 à l'EPITA par The Non‑Malicious Team (NMT), une équipe de 4 étudiants. Le module s'installe sur une machine victime, établit une connexion TCP persistante vers un programme attaquant distant, s'authentifie par hash de mot de passe, et exécute les commandes envoyées par l'attaquant.
 
-Le projet est pédagogique par nature : chaque choix est documenté et justifié, les "mauvaises pratiques" de sécurité offensive sont assumées et expliquées.
+Cette documentation est construite pour que n'importe qui puisse tester et comprendre le projet, étape par étape. La machine hôte doit tourner sur Arch Linux avec la virtualisation KVM disponible.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────┐          réseau vmnet           ┌─────────────────────┐
-│    VM Victime        │      192.168.100.x/24           │    VM Attaquante     │
-│    Debian 12         │ ◄──────────────────────────────► │    Arch Linux        │
-│                      │    TCP 4444 (reverse conn.)     │                      │
-│  wlkom.ko (kernel)   │                                 │  c2 (userland)       │
-│  - kthread           │                                 │  - écoute TCP        │
-│  - socket kernel     │                                 │  - envoie commandes  │
-│  - auth FNV-1a       │                                 │  - affiche résultats │
-│  - exec commandes    │                                 │                      │
-└─────────────────────┘                                  └─────────────────────┘
-         ▲
-         │ VirtFS / 9p
-         │ /mnt/vmshare/
-         ▼
-┌─────────────────────┐
-│   Machine hôte       │
-│   Arch Linux         │
-│   ./vmshare/         │
-└─────────────────────┘
+┌─────────────────────┐          réseau vmnet           ┌──────────────────────┐
+│    VM Victime       │      192.168.100.x/24           │    VM Attaquante     │
+│    Debian 12        │ ◄──────────────────────────────►│    Arch Linux        │
+│                     │    TCP 4444 (reverse conn.)     │                      │
+│  wlkom.ko (kernel)  │                                 │  c2 (userland)       │
+│  - kthread          │                                 │  - écoute TCP        │
+│  - socket kernel    │                                 │  - envoie commandes  │
+│  - auth FNV-1a      │                                 │  - affiche résultats │
+│  - exec commandes   │                                 │                      │
+└──────────┬──────────┘                                 └──────────┬───────────┘
+           │ VirtFS / 9p                                           │ VirtFS / 9p
+           │ /mnt/vmshare/                                         │ /mnt/vmshare/
+           ▼                                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           Machine hôte — Arch Linux                          │
+│                                  ./vmshare/                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Le rootkit initie la connexion (reverse connection) : c'est la victime qui appelle l'attaquant, pas l'inverse. Le C2 écoute, attend, et dès qu'un rootkit se connecte il envoie le hash d'authentification puis propose un shell interactif.
+Le rootkit initie la connexion (reverse connection) : c'est la victime qui appelle l'attaquant, pas l'inverse. Le C2 écoute, attend qu'un rootkit se connecte, demande le mot de passe, et après authentification réussie propose un shell interactif.
 
 ---
 
-## Composants
-
-| Composant | Langage | Rôle |
-|---|---|---|
-| `rootkit/wlkom.c` | C (kernel) | Module LKM — connexion, auth, exécution de commandes |
-| `attacking_program/c2.c` | C (userland) | Programme C2 — serveur TCP interactif |
-| `rootkit/install_persistence.sh` | Bash | Installe wlkom comme service systemd au boot |
-| `vm.sh` | Bash | Crée et lance les deux VMs QEMU/KVM |
-| `tests/run_tests.py` | Python 3 | Tests automatisés (sans VM) |
-
----
-
-## État des features
-
-| Feature | Points | État |
-|---|---|---|
-| Compile | 0.5 | ✅ Terminé |
-| Connexion TCP + retry | 3 | ✅ Terminé |
-| Persistance (systemd) | 1.5 | ✅ Terminé |
-| Authentification (FNV-1a) | 1 | ✅ Terminé |
-| Exécution de commandes | 5 | ✅ Terminé |
-| Upload / Download | 3 | ⬜ À faire |
-| Hide (fichiers, lignes, lsmod) | 5 | ⬜ À faire |
-| Chiffrement réseau | 1 | ⬜ À faire |
-
----
-
-## Navigation
+## Explorer
 
 <div class="grid cards" markdown>
 
-- **[Guide d'installation](guide/index.md)**
+-   :material-rocket-launch:{ .lg .middle } **Guide**
 
-    Tout ce qu'il faut pour installer, configurer et utiliser le projet de zéro. Prérequis, création des VMs, compilation, chargement du module, utilisation du C2.
+    ---
 
-- **[Code expliqué](code/index.md)**
+    Documentation pas à pas pour installer, configurer et utiliser le projet de zéro.
 
-    Documentation narrative du code source. Chaque fichier est expliqué bloc par bloc : ce que fait chaque fonction, pourquoi elle est écrite ainsi, les pièges évités.
+    [:octicons-arrow-right-24: Accéder au guide](guide/index.md)
 
-- **[Décisions de conception](decisions/index.md)**
+-   :material-lightbulb:{ .lg .middle } **Décisions de conception**
 
-    Pourquoi ces choix ? Chaque décision importante (distro, kernel, protocole, algo de hash…) est justifiée avec les alternatives envisagées.
+    ---
 
-- **[Tests](tests/index.md)**
+    Chaque décision importante est justifiée avec les alternatives envisagées.
 
-    Comment lancer la suite de tests, ce qu'elle couvre et ce qu'elle ne couvre pas.
+    [:octicons-arrow-right-24: Voir les décisions](decisions/index.md)
+
+-   :material-code-braces:{ .lg .middle } **Code expliqué**
+
+    ---
+
+    Documentation narrative du code source. Chaque fichier est expliqué bloc par bloc.
+
+    [:octicons-arrow-right-24: Lire le code](code/index.md)
+
+-   :material-book-alphabet:{ .lg .middle } **Glossaire**
+
+    ---
+
+    Définitions des termes techniques et acronymes utilisés dans le projet.
+
+    [:octicons-arrow-right-24: Voir le glossaire](glossaire.md)
 
 </div>

@@ -82,11 +82,7 @@ WantedBy=multi-user.target
 EOF
 ```
 
-Deux lignes importantes ici :
-
-**`After=network-online.target`** — Le service ne démarre qu'après que systemd considère le réseau comme "en ligne". Sans ça, `modprobe wlkom` s'exécuterait au boot avant que l'interface `vmnet` (192.168.100.x) soit configurée, et le module ne pourrait pas se connecter au C2. Le mécanisme de retry du kthread compenserait, mais il est plus propre de démarrer au bon moment.
-
-**`RemainAfterExit=yes`** — Quand `ExecStart` se termine (après que `modprobe wlkom` retourne), systemd marque le service comme `active (exited)` au lieu de `inactive`. Sans ça, le service semblerait s'être arrêté alors que le module est toujours chargé dans le kernel.
+Les choix de `After=network-online.target`, `Type=oneshot` et `RemainAfterExit=yes` sont justifiés dans [Décisions → Persistance](../decisions/persistence.md).
 
 ### 7. Activation du service
 

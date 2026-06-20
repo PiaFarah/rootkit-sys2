@@ -1,8 +1,8 @@
-site_name: WLKOM — Wild Linux Kernel Object Module
+site_name: WLKOM
 site_description: Rootkit pédagogique Linux — documentation complète du projet SYS2 EPITA
 site_url: https://piafarah.github.io/rootkit-sys2/
 repo_url: https://github.com/PiaFarah/rootkit-sys2
-repo_name: PiaFarah/rootkit-sys2
+repo_name: rootkit-sys2
 
 theme:
   name: material
@@ -34,19 +34,12 @@ theme:
 
 nav:
   - Accueil: index.md
-  - Guide d'installation:
+  - Guide:
     - guide/index.md
     - Créer les VMs: guide/vms.md
-    - Compiler le module: guide/compile.md
-    - Charger le module: guide/load.md
-    - Installer la persistance: guide/persistence.md
+    - Déployer le rootkit: guide/deploy.md
     - Utiliser le C2: guide/c2.md
-  - Code expliqué:
-    - code/index.md
-    - wlkom.c: code/wlkom.md
-    - c2.c: code/c2.md
-    - install_persistence.sh: code/install-persistence.md
-    - Protocole réseau: code/protocol.md
+    - Désinstaller: guide/uninstall.md
   - Décisions de conception:
     - decisions/index.md
     - Outil de documentation: decisions/tooling.md
@@ -55,8 +48,13 @@ nav:
     - Persistance: decisions/persistence.md
     - Exécution de commandes: decisions/exec.md
     - Authentification: decisions/password.md
-  - Tests:
-    - tests/index.md
+  - Code expliqué:
+    - code/index.md
+    - wlkom.c: code/wlkom.md
+    - c2.c: code/c2.md
+    - install_persistence.sh: code/install-persistence.md
+    - Protocole réseau: code/protocol.md
+  - Glossaire: glossaire.md
 
 extra_css:
   - stylesheets/extra.css
@@ -83,6 +81,7 @@ markdown_extensions:
   - pymdownx.tasklist:
       custom_checkbox: true
   - attr_list
+  - md_in_html
   - def_list
   - tables
   - toc:

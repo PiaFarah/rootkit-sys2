@@ -1,4 +1,4 @@
-# Code expliqué — Vue d'ensemble
+# Code expliqué
 
 Cette section documente le code source de WLKOM de façon narrative : pas des prototypes de fonctions listés en vrac, mais une explication de **ce qui se passe à l'intérieur de chaque bloc**, des choix faits, des pièges évités, et des conventions suivies.
 
