@@ -42,13 +42,12 @@ nav:
     - Désinstaller: guide/uninstall.md
   - Décisions de conception:
     - decisions/index.md
-    - Outil de documentation: decisions/tooling.md
-    - Environnement et VMs: decisions/environment.md
-    - Connexion TCP: decisions/connection.md
+    - Environnement: decisions/environment.md
+    - Connexion: decisions/connection.md
     - Persistance: decisions/persistence.md
-    - Exécution de commandes: decisions/exec.md
+    - Exécution: decisions/exec.md
     - Authentification: decisions/password.md
-  - Code expliqué:
+  - Implémentation:
     - code/index.md
     - wlkom.c: code/wlkom.md
     - c2.c: code/c2.md

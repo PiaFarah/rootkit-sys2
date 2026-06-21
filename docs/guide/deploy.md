@@ -1,7 +1,7 @@
 # Déployer le rootkit
 
 !!! question "Pourquoi ces choix ?"
-    Voir [Environnement](../decisions/environment.md) et [Persistance](../decisions/persistence.md).
+    Voir [Persistance](../decisions/persistence.md).
 
 La compilation et le déploiement se font **sur la VM Victime**. `make persistence` compile `wlkom.ko` et l'installe avec la persistance en une seule commande.
 

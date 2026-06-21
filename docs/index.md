@@ -52,13 +52,13 @@ Le rootkit initie la connexion (reverse connection) : c'est la victime qui appel
 
     [:octicons-arrow-right-24: Voir les décisions](decisions/index.md)
 
--   :material-code-braces:{ .lg .middle } **Code expliqué**
+-   :material-code-braces:{ .lg .middle } **Implémentation**
 
     ---
 
-    Documentation narrative du code source. Chaque fichier est expliqué bloc par bloc.
+    APIs kernel, flux d'exécution complet et protocole réseau expliqués composant par composant.
 
-    [:octicons-arrow-right-24: Lire le code](code/index.md)
+    [:octicons-arrow-right-24: Voir l'implémentation](code/index.md)
 
 -   :material-book-alphabet:{ .lg .middle } **Glossaire**
 
@@ -69,3 +69,13 @@ Le rootkit initie la connexion (reverse connection) : c'est la victime qui appel
     [:octicons-arrow-right-24: Voir le glossaire](glossaire.md)
 
 </div>
+
+---
+
+## Pourquoi MkDocs + Material ?
+
+La documentation était initialement dans un README surchargé : présentation, tutoriel, architecture et justifications mélangés, sans navigation. Le sujet impose de documenter l'installation complète et les justifications de choix, un README ne suffit pas.
+
+L'objectif était un outil qui laisse écrire librement en Markdown (documentation narrative, pas une génération depuis les commentaires), sans introduire de dépendance hors de l'écosystème du projet. Doxygen génère depuis les commentaires uniquement. Sphinx avec Breathe représente un pipeline de trois outils à configurer ensemble. Docusaurus nécessite Node.js, absent du projet (C + Python + Shell).
+
+MkDocs + Material est Python pur, Markdown natif, déploiement GitHub Pages en une commande, configuration en un seul fichier.

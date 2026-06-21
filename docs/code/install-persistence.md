@@ -28,7 +28,7 @@ read -s -p "WLKOM password: " password
 echo
 ```
 
-`-s` désactive l'écho — le mot de passe n'apparaît pas à l'écran pendant la saisie. C'est une précaution basique : quelqu'un qui regarde par-dessus l'épaule ne voit pas le mot de passe tapé.
+`-s` désactive l'écho. Le mot de passe n'apparaît pas à l'écran pendant la saisie. C'est une précaution basique : quelqu'un qui regarde par-dessus l'épaule ne voit pas le mot de passe tapé.
 
 ### 3. Calcul du hash FNV-1a
 
@@ -41,7 +41,7 @@ print(f'{h:08x}')
 ")
 ```
 
-On réimplémente FNV-1a en Python one-liner. Python 3 est présent sur la VM Victime (pré-installé avec Debian 12). Cette ligne produit exactement le même hash que `fnv1a_hash` dans `c2.c` — la vérification est possible manuellement en comparant les deux résultats pour un mot de passe connu.
+On réimplémente FNV-1a en Python one-liner. Python 3 est présent sur la VM Victime (pré-installé avec Debian 12). Cette ligne produit exactement le même hash que `fnv1a_hash` dans `c2.c`. La vérification est possible manuellement en comparant les deux résultats pour un mot de passe connu.
 
 ### 4. Installation du module dans le système
 
@@ -96,4 +96,4 @@ systemctl enable wlkom.service
 
 ## Ce que le script ne fait pas
 
-Le script n'est pas idempotent : relancer `install_persistence.sh` une deuxième fois écrase silencieusement la configuration existante avec les nouvelles valeurs. C'est un comportement attendu — si on change de mot de passe ou d'IP C2, on relance le script.
+Le script n'est pas idempotent : relancer `install_persistence.sh` une deuxième fois écrase silencieusement la configuration existante avec les nouvelles valeurs. C'est un comportement attendu. Si on change de mot de passe ou d'IP C2, on relance le script.
