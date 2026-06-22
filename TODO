@@ -9,7 +9,7 @@
 [ ] Upload / Download            (1.5 + 1.5pt)
 [ ] Hide dir/files from userland (2pt) : hook getdents64
 [ ] Hide line in file            (2pt) : hook read
-[ ] Hide module from lsmod       (1pt) : retirer de THIS_MODULE->list
+[x] Hide module from lsmod       (1pt) : retirer de THIS_MODULE->list
 [ ] Cipher réseau                (1pt) : chiffrement des trames TCP
 
 [INFRA]

