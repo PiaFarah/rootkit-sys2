@@ -16,6 +16,7 @@ Cette section justifie les choix techniques importants du projet. Chaque décisi
 | Exécution de commandes | `call_usermodehelper` + fichiers tmp | Capture stdout/stderr/exit séparés |
 | Hash d'authentification | FNV-1a 32-bit | Simple, reproductible, pas de dépendance externe |
 | Passage du hash | `module_param` | Le secret n'est jamais dans le binaire |
+| Masquage module | `list_del(THIS_MODULE->list)` | Technique classique, réversible, deux lignes de code |
 
 ---
 
