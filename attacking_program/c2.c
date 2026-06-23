@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 #define BUF_SIZE     256
 #define FNV1A_OFFSET 2166136261U
 #define FNV1A_PRIME  16777619U
+#define AUTH_REPLY_TIMEOUT_SEC 3
 
 static void timestamp(void)
 {
@@ -49,30 +51,6 @@ static int write_all(int fd, const char *buf, size_t len)
     }
 
     return 0;
-}
-
-static int read_line(int fd, char *buf, size_t size)
-{
-    size_t pos = 0;
-
-    while (pos + 1 < size) {
-        ssize_t n = read(fd, &buf[pos], 1);
-
-        if (n <= 0)
-            return -1;
-
-        if (buf[pos] == '\n') {
-            buf[pos] = '\0';
-            if (pos > 0 && buf[pos - 1] == '\r')
-                buf[pos - 1] = '\0';
-            return 0;
-        }
-
-        pos++;
-    }
-
-    buf[pos] = '\0';
-    return -1;
 }
 
 static uint8_t keystream_byte(uint32_t key, uint32_t pos)
@@ -115,7 +93,27 @@ static int read_encrypted_line(int fd, char *buf, size_t size,
     size_t rn = 0;
 
     while (rn + 1 < size) {
-        ssize_t n = read(fd, &buf[rn], 1);
+        fd_set readfds;
+        struct timeval timeout = {
+            .tv_sec = AUTH_REPLY_TIMEOUT_SEC,
+            .tv_usec = 0,
+        };
+        int ready;
+        ssize_t n;
+
+        FD_ZERO(&readfds);
+        FD_SET(fd, &readfds);
+
+        ready = select(fd + 1, &readfds, NULL, NULL, &timeout);
+        if (ready == 0)
+            return -1;
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+
+        n = read(fd, &buf[rn], 1);
         if (n <= 0)
             return -1;
 
