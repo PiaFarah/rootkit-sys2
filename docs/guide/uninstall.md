@@ -6,6 +6,9 @@ Cette page regroupe toutes les opérations de nettoyage et de désinstallation, 
 
 ## Désactiver la persistance et décharger le module
 
+!!! warning "Si le module a été caché"
+    Lancez `unhide_module` depuis le C2 **avant** `make uninstall` ou tout redémarrage. Sans ça, le kernel ne peut plus retrouver le module par son nom et la désinstallation propre est impossible sans redémarrage de la VM.
+
 Sur la **VM Victime**, supprime le service systemd, la configuration modprobe, le `.ko` installé, et décharge le module du noyau en cours :
 
 ```bash

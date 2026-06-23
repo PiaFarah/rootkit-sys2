@@ -243,6 +243,7 @@ def test_wlkom_hide_module_source():
         ('strcmp(cmd, "unhide_module")', "C2 command to unhide module"),
         ('strcmp(cmd, "module_status")', "C2 command to report module visibility"),
         ("show_module_in_lsmod();", "module restored during exit"),
+        ("hide_module_from_lsmod();\n\n    conn_thread", "module hidden automatically at init before thread starts"),
     ]
     for pattern, description in checks:
         require_source(pattern, description, source, "wlkom hide module source checks")
