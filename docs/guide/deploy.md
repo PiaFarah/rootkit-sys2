@@ -50,6 +50,8 @@ Start now with: sudo systemctl start wlkom.service
 
 `make persistence` enchaîne ensuite automatiquement avec `make restart` (`sudo systemctl restart wlkom.service`) — le service est actif sans intervention supplémentaire.
 
+Une fois chargé, le module accepte les commandes C2 pour l'exécution de shell, le masquage du module et les transferts de fichiers (`DOWNLOAD` et `UPLOAD`).
+
 ---
 
 ## Vérifier le déploiement

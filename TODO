@@ -6,14 +6,14 @@
 
 [OPTIONAL — 10/20, priorité par points]
 [x] Password       (1pt)   : non hardcodé (module_param et fichier config)
-[ ] Upload / Download            (1.5 + 1.5pt)
+[x] Upload / Download            (1.5 + 1.5pt)
 [ ] Hide dir/files from userland (2pt) : hook getdents64
 [ ] Hide line in file            (2pt) : hook read
 [x] Hide module from lsmod       (1pt) : retirer de THIS_MODULE->list
-[ ] Cipher réseau                (1pt) : chiffrement des trames TCP
+[x] Cipher réseau                (1pt) : chiffrement des trames TCP
 
 [INFRA]
 [x] Victim VM   : distro choisie, kernel >= 5.0.0, linux-headers installés
 [x] Attacking VM: distro choisie, C2 fonctionnel
 [x] Réseau QEMU : bridge virtuel entre les deux VMs configuré et testé
-[ ] README      : setup VMs, build, usage, justification choix techniques
+[x] README      : setup VMs, build, usage, justification choix techniques

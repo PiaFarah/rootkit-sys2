@@ -24,13 +24,13 @@ Le mode `0400` est appliqué aux trois paramètres : ils sont lisibles depuis `/
 
 ---
 
-## `recv_line` — recevoir une ligne depuis le socket
+## `recv_line` — recevoir une ligne chiffrée depuis le socket
 
 ```c
 static int recv_line(struct socket *sock, char *buf, int maxlen)
 ```
 
-Cette fonction lit le socket **octet par octet** jusqu'à trouver un `\n`. C'est délibérément simple : le protocole est texte, délimité par des sauts de ligne, et les messages sont courts (quelques dizaines d'octets au maximum). Une lecture byte-by-byte sur un socket kernel TCP n'est pas un problème de performance ici.
+Cette fonction lit le socket **octet par octet**, déchiffre chaque octet, puis s'arrête quand le texte déchiffré contient un `\n`. Elle est utilisée pour les commandes après authentification. Une lecture byte-by-byte sur un socket kernel TCP n'est pas un problème de performance ici, car les commandes sont courtes.
 
 Le point notable : elle gère `\r\n` (Windows line endings) en ignorant le `\r` si présent avant le `\n`. C'est une robustesse minimale au cas où le C2 tourne sur un système qui ajoute des `\r`.
 
@@ -44,7 +44,7 @@ Elle termine le buffer avec un `\0` et retourne la longueur lue (sans le `\n`), 
 static int send_reply(const char *reply)
 ```
 
-Un wrapper fin autour de `kernel_sendmsg`. Il construit un `kvec` (kernel iovec) pointant vers le buffer et appelle `kernel_sendmsg` en mode bloquant. La fonction utilise `conn_sock`, le socket global du module. Avoir un wrapper évite de répéter le boilerplate `kvec`/`msg_hdr` partout.
+Un wrapper autour de `kernel_sendmsg`. Il chiffre la réponse par chunks, construit un `kvec` (kernel iovec) pointant vers le buffer chiffré, puis appelle `kernel_sendmsg` en mode bloquant. La fonction utilise `conn_sock`, le socket global du module. Avoir un wrapper évite de répéter le boilerplate chiffrement/`kvec`/`msg_hdr` partout.
 
 ---
 
@@ -113,7 +113,9 @@ C'est une tentative de nettoyage basique. Les fichiers ne restent pas indéfinim
 static int authenticate_c2(void)
 ```
 
-Le C2 envoie `AUTH <hash>\n` dès que la connexion est établie. Cette fonction lit cette ligne via `recv_line`, vérifie qu'elle commence par `AUTH `, et compare le reste avec `password_hash` via `strcmp`. Si la comparaison échoue, la fonction retourne une erreur et `connection_thread` ferme la connexion puis retente.
+Le C2 envoie une trame logique `AUTH <hash>\n` dès que la connexion est établie. Sur le réseau, cette trame est chiffrée. Le rootkit lit exactement 14 octets avec `recv_auth_frame`, les déchiffre, vérifie que la trame commence par `AUTH `, que le dernier octet logique est `\n`, puis compare le hash avec `password_hash` via `strcmp`.
+
+Cette lecture à taille fixe évite un blocage quand le mot de passe est faux : avec une mauvaise clé, le saut de ligne chiffré ne se déchiffre pas nécessairement en `\n`. Si la comparaison échoue, la fonction retourne une erreur et `connection_thread` ferme la connexion puis retente.
 
 ---
 
