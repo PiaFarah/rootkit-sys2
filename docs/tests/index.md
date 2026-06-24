@@ -13,20 +13,10 @@ python3 tests/run_tests.py
 Sortie attendue (tout passe) :
 
 ```
-test_c2_builds ......................................... ok
-test_c2_requires_port_and_password ..................... ok
-test_c2_sends_auth_hash ................................ ok
-test_rootkit_makefile_compile_feature .................. ok
-test_wlkom_connection_source ........................... ok
-test_persistence_installer_source ...................... ok
-test_c2_fnv1a_source ................................... ok
-test_wlkom_password_auth_source ........................ ok
-test_wlkom_exec_source ................................. ok
-test_c2_exec_protocol .................................. ok
-----------------------------------------------------------------------
-Ran 10 tests in X.XXXs
-
-OK
+[OK] c2 builds
+...
+[OK] c2 exec protocol
+[OK] 16 tests passed
 ```
 
 ---
@@ -50,7 +40,7 @@ Aucune dépendance externe n'est nécessaire.
 | Test | Vérifie |
 |---|---|
 | `test_c2_builds` | `make` dans `attacking_program/` produit le binaire `c2` |
-| `test_c2_requires_port_and_password` | `./c2` sans arguments affiche l'usage et sort avec code ≠ 0 |
+| `test_c2_requires_port` | `./c2` sans arguments affiche l'usage et sort avec code ≠ 0 |
 | `test_rootkit_makefile_compile_feature` | `rootkit/Makefile` déclare `wlkom.o` comme LKM et délègue au build system kernel |
 
 ### Analyse statique du code source
@@ -60,15 +50,20 @@ Aucune dépendance externe n'est nécessaire.
 | `test_wlkom_connection_source` | Présence de kthread, socket TCP kernel, `connect`, `recv`, `shutdown`, retry |
 | `test_persistence_installer_source` | `install_persistence.sh` crée un service systemd |
 | `test_c2_fnv1a_source` | Constantes FNV-1a correctes (`2166136261`, `16777619`) |
-| `test_wlkom_password_auth_source` | Validation de la trame `AUTH` côté module |
+| `test_wlkom_password_auth_source` | Validation de la trame `AUTH` chiffrée côté module |
+| `test_wlkom_cipher_state_source` | État de chiffrement, compteurs `tx_pos` / `rx_pos`, reset par connexion |
 | `test_wlkom_exec_source` | Présence de `call_usermodehelper` et de la logique de capture |
 
 ### Tests réseau réels (sans VM)
 
 | Test | Ce qu'il fait |
 |---|---|
-| `test_c2_sends_auth_hash` | Lance le C2, se connecte dessus en TCP local, vérifie que la première trame reçue est `AUTH <hash_correct>\n` |
-| `test_c2_exec_protocol` | Simule un rootkit : se connecte au C2, envoie une fausse réponse, vérifie que le C2 la gère |
+| `test_c2_sends_auth_hash` | Lance le C2, se connecte dessus en TCP local, vérifie que la première trame se déchiffre en `AUTH <hash_correct>\n` et n'est pas envoyée en clair |
+| `test_c2_does_not_open_shell_on_auth_rejection` | Vérifie qu'un rejet d'authentification n'ouvre pas le shell |
+| `test_c2_rejects_plaintext_auth_ack` | Vérifie qu'un `AUTH_OK` en clair n'est pas accepté |
+| `test_c2_auth_timeout_allows_retry` | Vérifie qu'une auth sans réponse ne bloque pas le C2 et qu'une reconnexion redemande le mot de passe |
+| `test_c2_detects_idle_disconnect` | Vérifie que le C2 détecte une déconnexion même sans commande opérateur |
+| `test_c2_exec_protocol` | Simule un rootkit : se connecte au C2, échange des trames chiffrées, vérifie que le C2 relaie la commande et affiche la réponse |
 
 ---
 
@@ -81,7 +76,7 @@ Les tests locaux sont un filet de sécurité rapide, pas une suite d'intégratio
 | Compilation de `wlkom.ko` | Nécessite les headers du kernel de la VM Victime |
 | Chargement du module (`insmod`) | Nécessite le kernel de la VM Victime et les droits root |
 | Connexion réelle TCP inter-VM | Nécessite les deux VMs en cours d'exécution |
-| Retry automatique après déconnexion | Test manuel entre les deux VMs |
+| Retry automatique réel après déconnexion | Test manuel entre les deux VMs |
 | Persistance après reboot | Test manuel : reboot + vérification SSH |
 
 Ces tests d'intégration sont décrits dans les guides respectifs du [Guide d'installation](../guide/index.md).
