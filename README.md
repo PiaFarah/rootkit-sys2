@@ -39,8 +39,6 @@ cd /mnt/vmshare/rootkit && make persistence
 
 ```
 
----
-
 ## Structure
 
 ```

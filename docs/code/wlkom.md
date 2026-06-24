@@ -186,6 +186,16 @@ while (!kthread_should_stop()) {
 
 ---
 
+## Masquage du module
+
+`lsmod` et `/proc/modules` parcourent la liste doublement chaînée `THIS_MODULE->list`. Cacher le module revient à faire un `list_del` de cette entrée en sauvegardant `list.prev` pour pouvoir la réinsérer au bon endroit avec `list_add`. Un booléen `module_hidden` garde l'état pour rendre les opérations idempotentes.
+
+Le masquage est appliqué automatiquement dans `wlkom_init()` avant le lancement du kthread, le module est invisible dès l'`insmod`. `wlkom_exit()` réinsère le module avant déchargement pour ne pas laisser la liste dans un état incohérent.
+
+`handle_control_command` intercepte les commandes `hide_module`, `unhide_module` et `module_status` avant `execute_and_send_output`, en réutilisant le même format de réponse pour que le C2 n'ait pas à distinguer les deux types.
+
+---
+
 ## `wlkom_init` et `wlkom_exit` — init et cleanup du module
 
 ### Init

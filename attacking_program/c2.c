@@ -305,6 +305,7 @@ int main(int argc, char **argv)
 
         printf("\n=== WLKOM INTERACTIVE SHELL ===\n");
         printf("Type your command and press Enter. Type 'exit' to quit.\n\n");
+        printf("Control commands: hide_module, unhide_module, module_status.\n\n");
 
         while (1) {
     int ready;
